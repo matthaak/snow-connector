@@ -1,0 +1,16 @@
+{
+  "name": "snow-connector",
+  "version": "1.0.0",
+  "description": "Snow Connector with Model Manager",
+  "main": "run.js",
+  "scripts": {
+    "start": "node run.js",
+    "test": "jasmine"
+  },
+  "dependencies": {
+    "model-manager": "file:../model-manager"
+  },
+  "devDependencies": {
+    "jasmine": "^6.0.0"
+  }
+}
