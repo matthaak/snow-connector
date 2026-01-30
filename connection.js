@@ -2,6 +2,8 @@
 /**
  * Connection class manages connection state to a ServiceNow instance.
  * 
+ * Connection obtains model and browser from providers, and health checker from a factory.
+ * 
  * Connection Methods (turning "on"):
  * - Method A: Automatically turns on when browser cookies for the connection's domain
  *   change from not having glide_session_store to having it, or when the glide_session_store
@@ -18,33 +20,42 @@
  *   change from having glide_session_store to not having it (or being deleted).
  *   Monitors ${id}_browser_cookies object. Handled by handleModelChange().
  */
+
+const {
+  getModelProvider,
+  getBrowserProvider,
+  getHealthCheckerFactory,
+} = require('./providers.js');
+
 class Connection {
-  constructor({ model, id, url, browser, healthChecker, validationInterval }) {
-    this.model = model;
+  constructor({ id }) {
     this.id = id;
-    this.url = url;
-    this.browser = browser;
-    this.healthChecker = healthChecker;
-    this.validationInterval = validationInterval;
+    this.model = getModelProvider().getModel();
+    this.browser = getBrowserProvider().getBrowser();
+    this.healthChecker = getHealthCheckerFactory().create(id);
 
     // Initialize connection status
     const statusKey = `${id}_conn_status`;
     this.model.set(statusKey, 'off');
 
-    // Store key names for convenience
+    // Store key names for convenience (url and validationInterval read from model)
     this.statusKey = statusKey;
+    this.urlKey = `${id}_url`;
+    this.validationIntervalKey = `${id}_validationInterval`;
     this.cookiesKey = `${id}_browser_cookies`; // Object: domain -> cookie string
     this.sessionStoreKey = `${id}_conn_glide_session_store`;
     this.lastActivityKey = `${id}_last_activity`;
-
-    // Extract FQDN from URL for domain-scoped cookie monitoring
-    this.urlFqdn = this.extractFqdn(this.url);
 
     // Track validation interval timer
     this.validationTimer = null;
 
     // Listen for browser cookies changes
     this.model.on('change', this.handleModelChange.bind(this));
+  }
+
+  getUrlFqdn() {
+    const url = this.model.get(this.urlKey);
+    return this.extractFqdn(url);
   }
 
   /**
@@ -79,11 +90,12 @@ class Connection {
     const oldCookiesObj = event.oldValue || {};
 
     // Get cookies for this connection's domain
+    const urlFqdn = this.getUrlFqdn();
     const newCookieValue = (typeof newCookiesObj === 'object' && newCookiesObj !== null) 
-      ? newCookiesObj[this.urlFqdn] 
+      ? newCookiesObj[urlFqdn] 
       : null;
     const oldCookieValue = (typeof oldCookiesObj === 'object' && oldCookiesObj !== null) 
-      ? oldCookiesObj[this.urlFqdn] 
+      ? oldCookiesObj[urlFqdn] 
       : null;
 
     // Extract glide_session_store from new cookie (for this domain)
@@ -126,6 +138,7 @@ class Connection {
     // 2. Old cookie had a different glide_session_store value than new cookie
     if (newSessionStore && (oldSessionStore === null || oldSessionStore !== newSessionStore)) {
       this.model.set(this.statusKey, 'on');
+      this.model.set(this.lastActivityKey, Date.now()); // stamp so validation loop can run; health checker will refresh on success
       this.startValidationLoop();
     }
   }
@@ -134,16 +147,17 @@ class Connection {
    * Method B: Manually connect the connection.
    * Requires health check to pass.
    * Uses cookies for this connection's domain from browser_cookies object.
-   * @returns {boolean} true if connection was turned on, false otherwise
+   * @returns {Promise<boolean>} Resolves with true if connection was turned on, false otherwise
    */
-  connect() {
+  async connect() {
     const cookiesObj = this.model.get(this.cookiesKey);
     if (!cookiesObj || typeof cookiesObj !== 'object' || cookiesObj === null) {
       return false;
     }
 
     // Get cookie for this connection's domain
-    const cookie = cookiesObj[this.urlFqdn];
+    const urlFqdn = this.getUrlFqdn();
+    const cookie = cookiesObj[urlFqdn];
     if (!cookie || typeof cookie !== 'string') {
       return false;
     }
@@ -156,9 +170,10 @@ class Connection {
 
     const sessionStore = sessionStoreMatch[1];
 
-    // Method B: Always perform health check
+    // Method B: Always perform health check (supports sync or async doCheck)
     if (this.healthChecker && typeof this.healthChecker.doCheck === 'function') {
-      if (this.healthChecker.doCheck()) {
+      const ok = await Promise.resolve(this.healthChecker.doCheck());
+      if (ok) {
         this.model.set(this.sessionStoreKey, sessionStore);
         this.model.set(this.statusKey, 'on');
         this.startValidationLoop();
@@ -191,6 +206,11 @@ class Connection {
       return;
     }
 
+    const validationInterval = this.model.get(this.validationIntervalKey) || 0;
+    if (!validationInterval) {
+      return;
+    }
+
     this.validationTimer = setInterval(() => {
       // Check if connection is still on
       if (this.model.get(this.statusKey) !== 'on') {
@@ -205,17 +225,20 @@ class Connection {
 
       const now = Date.now();
       const timeSinceActivity = now - lastActivity;
+      const interval = this.model.get(this.validationIntervalKey) || 0;
 
       // Method P: If last activity is at or before validationInterval ms ago, check health
-      if (timeSinceActivity >= this.validationInterval) {
+      if (timeSinceActivity >= interval) {
         if (this.healthChecker && typeof this.healthChecker.doCheck === 'function') {
-          if (!this.healthChecker.doCheck()) {
-            this.model.set(this.statusKey, 'off');
-            this.stopValidationLoop();
-          }
+          Promise.resolve(this.healthChecker.doCheck()).then((ok) => {
+            if (!ok) {
+              this.model.set(this.statusKey, 'off');
+              this.stopValidationLoop();
+            }
+          });
         }
       }
-    }, this.validationInterval);
+    }, validationInterval);
   }
 
   stopValidationLoop() {

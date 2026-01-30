@@ -1,9 +1,14 @@
 // connection.spec.js
 const { Connection } = require('../connection');
-const { ObservableModel } = require('model-manager/observable-model');
+const {
+  getModelProvider,
+  setBrowserProvider,
+  setHealthCheckerFactory,
+} = require('../providers.js');
 
 describe('Connection', () => {
   let model;
+  let connection;
   let browser;
   let healthChecker;
   const id = 0;
@@ -12,7 +17,9 @@ describe('Connection', () => {
   const validationInterval = 1; // 1ms for fast tests
 
   beforeEach(() => {
-    model = new ObservableModel();
+    model = getModelProvider().getModel();
+    model.reset();
+
     browser = {
       // Mock browser that can set cookies on the model
       // cookiesObj should be { "domain.com": "cookie string", ... }
@@ -40,13 +47,24 @@ describe('Connection', () => {
     healthChecker = {
       doCheck: jasmine.createSpy('doCheck').and.returnValue(true)
     };
-    
+
+    // Override browser and health checker factory so Connection gets mock browser and mock health checker
+    setBrowserProvider({ getBrowser: () => browser });
+    setHealthCheckerFactory({ create: () => healthChecker });
+
+    // Connection reads url and validationInterval from model
+    model.set(`${id}_url`, url);
+    model.set(`${id}_validationInterval`, validationInterval);
+
     // Initialize with empty cookies object
     browser.setCookies({});
   });
 
   afterEach(() => {
-    // Clean up any timers if clock is installed
+    if (connection) {
+      connection.disconnect();
+      connection = null;
+    }
     try {
       jasmine.clock().uninstall();
     } catch (e) {
@@ -56,27 +74,13 @@ describe('Connection', () => {
 
   describe('Initialization', () => {
     it('should set connection status to "off" on init', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       expect(model.get('0_conn_status')).toBe('off');
     });
 
     it('should listen for browser cookie changes', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set initial cookie with session store (from null to having it - should turn on)
       browser.setCookie('glide_session_store=abc123');
@@ -92,14 +96,7 @@ describe('Connection', () => {
 
   describe('Method A: Turning on via browser cookie change', () => {
     it('should turn on when browser cookie changes with new glide_session_store', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set initial cookie (will turn on from null -> has value)
       browser.setCookie('glide_session_store=abc123');
@@ -121,14 +118,7 @@ describe('Connection', () => {
     });
 
     it('should not turn on if glide_session_store value has not changed', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set initial cookie (will turn on from null -> has value)
       browser.setCookie('glide_session_store=abc123');
@@ -153,14 +143,7 @@ describe('Connection', () => {
     });
 
     it('should not turn on if cookie does not contain glide_session_store', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       browser.setCookie('some_other_cookie=value');
       
@@ -171,14 +154,7 @@ describe('Connection', () => {
     });
 
     it('should turn on when cookie changes from null to having glide_session_store', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Initially no cookie (null/undefined)
       expect(model.get('0_browser_cookie')).toBeUndefined();
@@ -194,14 +170,7 @@ describe('Connection', () => {
     });
 
     it('should turn on when cookie changes from lacking glide_session_store to having it', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie without glide_session_store
       browser.setCookie('some_other_cookie=value');
@@ -221,14 +190,7 @@ describe('Connection', () => {
     });
 
     it('should not turn on when cookie changes from having glide_session_store to lacking it (if already off)', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie with glide_session_store (turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -252,14 +214,7 @@ describe('Connection', () => {
     });
 
     it('should not turn on when cookie is set for different domain', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie for a different ServiceNow instance domain
       browser.setCookieForDomain('different-instance.service-now.com', 'glide_session_store=abc123');
@@ -272,14 +227,7 @@ describe('Connection', () => {
     });
 
     it('should turn on when cookie is set for matching domain', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie for the connection's domain
       browser.setCookie('glide_session_store=abc123');
@@ -292,14 +240,7 @@ describe('Connection', () => {
     });
 
     it('should disconnect when cookie for matching domain is removed', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie for matching domain (turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -319,14 +260,7 @@ describe('Connection', () => {
     });
 
     it('should ignore cookie changes for other domains', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie for a different domain - should not turn on
       browser.setCookieForDomain('other-instance.service-now.com', 'glide_session_store=xyz789');
@@ -348,14 +282,7 @@ describe('Connection', () => {
 
   describe('Method R: Disconnecting via cookie loss', () => {
     it('should disconnect when cookie changes from having glide_session_store to lacking it', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie with glide_session_store (turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -375,14 +302,7 @@ describe('Connection', () => {
     });
 
     it('should disconnect when cookie for domain is removed from cookies object', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Set cookie with glide_session_store (turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -403,125 +323,84 @@ describe('Connection', () => {
   });
 
   describe('Method B: Turning on via connect() method', () => {
-    it('should turn on and return true if health check passes', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should turn on and return true if health check passes', async () => {
+      connection = new Connection({ id });
 
       browser.setCookie('glide_session_store=abc123');
       
       // Wait for cookie change handler to potentially turn it on, then disconnect
-      setTimeout(() => {
-        connection.disconnect();
-        expect(model.get('0_conn_status')).toBe('off');
+      await new Promise((r) => setTimeout(r, 10));
+      connection.disconnect();
+      expect(model.get('0_conn_status')).toBe('off');
 
-        healthChecker.doCheck.and.returnValue(true);
-        healthChecker.doCheck.calls.reset(); // Reset call count
+      healthChecker.doCheck.and.returnValue(true);
+      healthChecker.doCheck.calls.reset(); // Reset call count
 
-        const result = connection.connect();
+      const result = await connection.connect();
 
-        expect(result).toBe(true);
-        expect(model.get('0_conn_status')).toBe('on');
-        expect(model.get('0_conn_glide_session_store')).toBe('abc123');
-        expect(healthChecker.doCheck).toHaveBeenCalled();
-        done();
-      }, 10);
+      expect(result).toBe(true);
+      expect(model.get('0_conn_status')).toBe('on');
+      expect(model.get('0_conn_glide_session_store')).toBe('abc123');
+      expect(healthChecker.doCheck).toHaveBeenCalledWith();
     });
 
-    it('should not turn on if health check fails', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should not turn on if health check fails', async () => {
+      connection = new Connection({ id });
 
       browser.setCookie('glide_session_store=abc123');
       
       // Wait for cookie change handler to potentially turn it on, then disconnect
-      setTimeout(() => {
-        connection.disconnect();
-        expect(model.get('0_conn_status')).toBe('off');
-        
-        healthChecker.doCheck.and.returnValue(false); // Make health check fail
-        healthChecker.doCheck.calls.reset(); // Reset call count
-
-        const result = connection.connect();
-
-        expect(result).toBe(false);
-        expect(model.get('0_conn_status')).toBe('off');
-        expect(healthChecker.doCheck).toHaveBeenCalled();
-        done();
-      }, 10);
-    });
-
-
-    it('should not turn on if health check fails (condition ii fails)', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
-
-      browser.setCookie('glide_session_store=abc123');
+      await new Promise((r) => setTimeout(r, 10));
+      connection.disconnect();
+      expect(model.get('0_conn_status')).toBe('off');
       
-      // Wait for cookie change handler to potentially turn it on, then disconnect
-      setTimeout(() => {
-        connection.disconnect();
-        expect(model.get('0_conn_status')).toBe('off');
-        
-        healthChecker.doCheck.and.returnValue(false);
-        healthChecker.doCheck.calls.reset(); // Reset call count
+      healthChecker.doCheck.and.returnValue(false); // Make health check fail
+      healthChecker.doCheck.calls.reset(); // Reset call count
 
-        const result = connection.connect();
-
-        expect(result).toBe(false);
-        expect(model.get('0_conn_status')).toBe('off');
-        expect(healthChecker.doCheck).toHaveBeenCalled();
-        done();
-      }, 10);
-    });
-
-    it('should return false if cookie does not contain glide_session_store', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
-
-      browser.setCookie('some_other_cookie=value');
-
-      const result = connection.connect();
+      const result = await connection.connect();
 
       expect(result).toBe(false);
       expect(model.get('0_conn_status')).toBe('off');
-      expect(healthChecker.doCheck).not.toHaveBeenCalled();
+      expect(healthChecker.doCheck).toHaveBeenCalledWith();
     });
 
-    it('should return false if cookie is not set', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
 
-      const result = connection.connect();
+    it('should not turn on if health check fails (condition ii fails)', async () => {
+      connection = new Connection({ id });
+
+      browser.setCookie('glide_session_store=abc123');
+      
+      // Wait for cookie change handler to potentially turn it on, then disconnect
+      await new Promise((r) => setTimeout(r, 10));
+      connection.disconnect();
+      expect(model.get('0_conn_status')).toBe('off');
+      
+      healthChecker.doCheck.and.returnValue(false);
+      healthChecker.doCheck.calls.reset(); // Reset call count
+
+      const result = await connection.connect();
+
+      expect(result).toBe(false);
+      expect(model.get('0_conn_status')).toBe('off');
+      expect(healthChecker.doCheck).toHaveBeenCalledWith();
+    });
+
+    it('should return false if cookie does not contain glide_session_store', async () => {
+      connection = new Connection({ id });
+
+      browser.setCookie('some_other_cookie=value');
+
+      const result = await connection.connect();
+
+      expect(result).toBe(false);
+      expect(model.get('0_conn_status')).toBe('off');
+      expect(healthChecker.doCheck).not.toHaveBeenCalledWith();
+    });
+
+    it('should return false if cookie is not set', async () => {
+      connection = new Connection({ id });
+
+      const result = await connection.connect();
 
       expect(result).toBe(false);
       expect(model.get('0_conn_status')).toBe('off');
@@ -538,21 +417,14 @@ describe('Connection', () => {
       jasmine.clock().uninstall();
     });
 
-    it('should disconnect when health check fails during validation loop', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should disconnect when health check fails during validation loop', async () => {
+      connection = new Connection({ id });
 
       // Turn connection on
       const now = Date.now();
       model.set('0_last_activity', now);
       browser.setCookie('glide_session_store=abc123');
-      connection.connect();
+      await connection.connect();
 
       expect(model.get('0_conn_status')).toBe('on');
 
@@ -568,25 +440,21 @@ describe('Connection', () => {
       // Advance time to trigger validation loop
       jasmine.clock().tick(validationInterval + 1);
 
+      // Allow promise from doCheck to settle
+      await new Promise((r) => setImmediate(r));
+
       expect(model.get('0_conn_status')).toBe('off');
-      expect(healthChecker.doCheck).toHaveBeenCalled();
+      expect(healthChecker.doCheck).toHaveBeenCalledWith();
     });
 
-    it('should not disconnect when health check passes during validation loop', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should not disconnect when health check passes during validation loop', async () => {
+      connection = new Connection({ id });
 
       // Turn connection on
       const now = Date.now();
       model.set('0_last_activity', now);
       browser.setCookie('glide_session_store=abc123');
-      connection.connect();
+      await connection.connect();
 
       expect(model.get('0_conn_status')).toBe('on');
 
@@ -602,25 +470,21 @@ describe('Connection', () => {
       // Advance time to trigger validation loop
       jasmine.clock().tick(validationInterval + 1);
 
+      // Allow promise from doCheck to settle
+      await new Promise((r) => setImmediate(r));
+
       expect(model.get('0_conn_status')).toBe('on');
-      expect(healthChecker.doCheck).toHaveBeenCalled();
+      expect(healthChecker.doCheck).toHaveBeenCalledWith();
     });
 
-    it('should not check health if last activity is recent', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should not check health if last activity is recent', async () => {
+      connection = new Connection({ id });
 
       // Turn connection on
       const now = Date.now();
       model.set('0_last_activity', now);
       browser.setCookie('glide_session_store=abc123');
-      connection.connect();
+      await connection.connect();
 
       expect(model.get('0_conn_status')).toBe('on');
 
@@ -634,25 +498,18 @@ describe('Connection', () => {
       jasmine.clock().tick(validationInterval - 1);
 
       // Health check should not be called because last activity is recent
-      expect(healthChecker.doCheck).not.toHaveBeenCalled();
+      expect(healthChecker.doCheck).not.toHaveBeenCalledWith();
       expect(model.get('0_conn_status')).toBe('on');
     });
 
-    it('should stop validation loop when connection goes off', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should stop validation loop when connection goes off', async () => {
+      connection = new Connection({ id });
 
       // Turn connection on
       const now = Date.now();
       model.set('0_last_activity', now);
       browser.setCookie('glide_session_store=abc123');
-      connection.connect();
+      await connection.connect();
 
       expect(model.get('0_conn_status')).toBe('on');
 
@@ -673,14 +530,7 @@ describe('Connection', () => {
 
   describe('Method Q: Disconnecting via disconnect() method', () => {
     it('should set status to "off" when disconnect() is called', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Turn connection on first - set initial cookie (null -> has value turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -695,23 +545,16 @@ describe('Connection', () => {
       }, 10);
     });
 
-    it('should stop validation loop when disconnect() is called', () => {
+    it('should stop validation loop when disconnect() is called', async () => {
       jasmine.clock().install();
       jasmine.clock().mockDate(new Date(1000000));
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Turn connection on
       const now = Date.now();
       model.set('0_last_activity', now);
       browser.setCookie('glide_session_store=abc123');
-      connection.connect();
+      await connection.connect();
 
       expect(model.get('0_conn_status')).toBe('on');
 
@@ -731,17 +574,10 @@ describe('Connection', () => {
   });
 
   describe('Integration: Multiple state transitions', () => {
-    it('should handle turning on via method A, then off via method P', () => {
+    it('should handle turning on via method A, then off via method P', async () => {
       jasmine.clock().install();
       jasmine.clock().mockDate(new Date(1000000));
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Turn on via method A - set initial cookie (null -> has value turns on)
       browser.setCookie('glide_session_store=abc123');
@@ -759,27 +595,23 @@ describe('Connection', () => {
       model.set('0_last_activity', now - validationInterval - 1);
       healthChecker.doCheck.and.returnValue(false);
 
-      // Advance time to trigger validation
+      // Advance time to trigger validation loop
       jasmine.clock().tick(validationInterval + 1);
+
+      // Allow promise from doCheck to settle
+      await new Promise((r) => setImmediate(r));
 
       expect(model.get('0_conn_status')).toBe('off');
       jasmine.clock().uninstall();
     });
 
-    it('should handle turning on via method B, then off via method Q', () => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+    it('should handle turning on via method B, then off via method Q', async () => {
+      connection = new Connection({ id });
 
       // Turn on via method B (requires health check to pass)
       browser.setCookie('glide_session_store=abc123');
       healthChecker.doCheck.and.returnValue(true);
-      const result = connection.connect();
+      const result = await connection.connect();
 
       expect(result).toBe(true);
       expect(model.get('0_conn_status')).toBe('on');
@@ -791,14 +623,7 @@ describe('Connection', () => {
     });
 
     it('should handle turning on via method A, then off via method R', (done) => {
-      const connection = new Connection({
-        model,
-        id,
-        url,
-        browser,
-        healthChecker,
-        validationInterval
-      });
+      connection = new Connection({ id });
 
       // Turn on via method A - set initial cookie (null -> has value turns on)
       browser.setCookie('glide_session_store=abc123');
