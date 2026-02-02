@@ -3,7 +3,7 @@ const { ModelManager } = require('model-manager/model-manager');
 const { startMockServiceNow } = require('./mock-servicenow.js');
 const { getBrowserProvider } = require('./providers.js');
 const { Connection } = require('./connection.js');
-const { startCookieSync } = require('./cookieSync.js');
+const { startBrowserSync } = require('./browserSync.js');
 
 // Update the URL to your ServiceNow instance
 const instanceUrl = 'https://dev224422.service-now.com';
@@ -44,7 +44,7 @@ async function main() {
   const secondPage = await browser.newPage();
   await secondPage.goto(instanceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-  startCookieSync([connectionId], 2000);
+  startBrowserSync();
 
   console.log('Browser opened: monitor in first tab, ServiceNow instance in second. Press Ctrl-C to exit.');
 }

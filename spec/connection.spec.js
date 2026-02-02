@@ -21,27 +21,31 @@ describe('Connection', () => {
     model.reset();
 
     browser = {
-      // Mock browser that can set cookies on the model
-      // cookiesObj should be { "domain.com": "cookie string", ... }
+      // Mock browser that can set cookies on the model (global browser_cookies key)
       setCookies: (cookiesObj) => {
-        model.set(`${id}_browser_cookies`, cookiesObj);
+        model.set('browser_cookies', cookiesObj);
       },
-      // Helper to set cookie for a specific domain
       setCookieForDomain: (domain, cookieValue) => {
-        const currentCookies = model.get(`${id}_browser_cookies`) || {};
+        const currentCookies = model.get('browser_cookies') || {};
         const newCookies = { ...currentCookies, [domain]: cookieValue };
-        model.set(`${id}_browser_cookies`, newCookies);
+        model.set('browser_cookies', newCookies);
       },
-      // Helper to remove cookie for a specific domain
       removeCookieForDomain: (domain) => {
-        const currentCookies = model.get(`${id}_browser_cookies`) || {};
+        const currentCookies = model.get('browser_cookies') || {};
         const newCookies = { ...currentCookies };
         delete newCookies[domain];
-        model.set(`${id}_browser_cookies`, newCookies);
+        model.set('browser_cookies', newCookies);
       },
-      // Convenience method to set cookie for the test URL domain
       setCookie: (cookieValue) => {
         browser.setCookieForDomain(urlDomain, cookieValue);
+      },
+      setGcks: (gCksObj) => {
+        model.set('browser_g_cks', gCksObj);
+      },
+      setGckForDomain: (domain, gCkValue) => {
+        const current = model.get('browser_g_cks') || {};
+        const next = { ...current, [domain]: gCkValue };
+        model.set('browser_g_cks', next);
       }
     };
     healthChecker = {

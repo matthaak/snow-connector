@@ -6,20 +6,20 @@ This module provides **connection state** for ServiceNow instances: it tracks wh
 
 A **Puppeteer-controlled browser** is used so the user can log in to ServiceNow in a real browser (with password saving, same-origin behavior, etc.). That browser session is **not** used directly for your Node.js code. Instead:
 
-1. **Cookie sync** – Cookies from the browser (all tabs, all domains) are periodically read and written into the shared model under `${id}_browser_cookies` (a map of domain → cookie string).
-2. **Connection** – The Connection class watches `${id}_browser_cookies` for the instance’s domain. When it sees a `glide_session_store` cookie (login), it turns the connection **on**; when that cookie disappears (logout), it turns **off**.
-3. **Node.js HTTP** – Your code reads the cookie string for the instance from the model (`${id}_browser_cookies`[domain]) and sends it as the `Cookie` header on any Node.js HTTP request (e.g. using this module’s `httpGet` or your own client). So the **same session** the user established in the browser is reused for server-side requests.
+1. **Browser sync** – On each page load (any tab, any domain), cookies and g_ck for that page's domain are written into the shared model: **browser_cookies** (domain → cookie string) and **browser_g_cks** (domain → detected g_ck value). No interval; updates are driven by the browser load event.
+2. **Connection** – The Connection class watches **browser_cookies** for the instance’s domain. When it sees a `glide_session_store` cookie (login), it turns the connection **on**; when that cookie disappears (logout), it turns **off**.
+3. **Node.js HTTP** – Your code reads the cookie string for the instance from the model (`browser_cookies`[domain]) and sends it as the `Cookie` header on any Node.js HTTP request (e.g. using this module’s `httpGet` or your own client). So the **same session** the user established in the browser is reused for server-side requests.
 
-So: **browser session → cookie sync → model → Connection state and cookie string → your HTTP requests.**
+So: **browser session → browser sync → model → Connection state and cookie string → your HTTP requests.**
 
 ## What it provides
 
 - **Connection** – A class that manages connection state per instance (by `id`). It turns **on** when browser cookies for that instance’s domain include `glide_session_store` (e.g. user logs in in a Puppeteer-controlled browser), or when you call `connect()` after a successful health check. It turns **off** when the session cookie disappears (e.g. logout), when the health check fails after a period of inactivity, or when you call `disconnect()`.
-- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_browser_cookies`, `${id}_conn_glide_session_store`, `${id}_last_activity`. Your app (or model-manager UI) can read and react to these.
+- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_conn_glide_session_store`, `${id}_last_activity`. Global keys **browser_cookies** and **browser_g_cks** (domain → value) are updated by browser sync. Your app (or model-manager UI) can read and react to these.
 - **Health checker** – Validates the session by requesting a known path (e.g. `/nav_to.do?uri=sys.scripts.do`) with the instance cookies and updates `${id}_last_activity` on success.
 - **Providers** – Pluggable model, browser, and health-checker factories so you can use your own model, a real Puppeteer browser, or mocks in tests.
-- **Browser and cookie sync** – Helpers to launch Chromium/Chrome or Firefox (with persistent profiles and password saving) and to sync browser cookies from all tabs into the model so Connection can see login/logout.
-- **httpGet** – A small HTTP GET helper that follows redirects and accepts an optional `Cookie` header value, so you can pass the session cookie from the model.
+- **Browser sync** – Helpers to launch Chromium/Chrome or Firefox (with persistent profiles and password saving) and to sync browser state (cookies and g_ck) into the model on each page load so Connection can see login/logout.
+- **httpGet** – HTTP GET that follows redirects and resolves Cookie and X-UserToken from the model by URL hostname (no need to pass them in).
 
 ## Usage examples
 
@@ -31,7 +31,7 @@ Assume a shared **model** (e.g. from `model-manager`). The default browser provi
 const model = require('model-manager/model'); // or your model
 const { getBrowserProvider } = require('snow-connector/providers.js');
 const { Connection } = require('snow-connector/connection.js');
-const { startCookieSync } = require('snow-connector/cookieSync.js');
+const { startBrowserSync } = require('snow-connector/browserSync.js');
 const { httpGet } = require('snow-connector/http.js');
 
 // 1. Configure the browser (optional path = use Puppeteer's Chromium; set one path to use Chrome or Firefox)
@@ -51,47 +51,21 @@ model.set(`${connectionId}_url`, instanceUrl);
 model.set(`${connectionId}_validationInterval`, 60000); // ms between health checks when stale
 const connection = new Connection({ id: connectionId });
 
-// 3. Launch the browser and start syncing cookies (so Connection sees login/logout)
+// 3. Launch the browser and start syncing browser state on each page load (so Connection sees login/logout)
 async function startBrowser() {
   await provider.launch({ initialUrl: instanceUrl });
-  startCookieSync([connectionId], 2000);
+  startBrowserSync();
 }
 
-// 4. Helpers: get instance URL and session cookie from the model; use them with httpGet to make authenticated requests
-function getInstanceUrl() {
-  return model.get(`${connectionId}_url`);
-}
-
-function getCookieForInstance() {
-  const cookiesObj = model.get(`${connectionId}_browser_cookies`);
-  if (!cookiesObj || typeof cookiesObj !== 'object') return null;
-  const url = getInstanceUrl();
-  if (!url) return null;
-  const fqdn = new URL(url).hostname;
-  return cookiesObj[fqdn] || null;
-}
-
-async function fetchWithSession(path) {
-  const baseUrl = getInstanceUrl();
-  if (!baseUrl) throw new Error('No instance URL');
-  const url = (baseUrl.replace(/\/+$/, '') + (path.startsWith('/') ? path : '/' + path));
-  const cookie = getCookieForInstance();
-  const { statusCode, finalUrl } = await httpGet(url, cookie);
-  return { statusCode, finalUrl };
-}
-
-// Example: only call the API when connection is on
+// 4. Make requests: httpGet looks up Cookie and X-UserToken from the model by URL hostname
 async function fetchIncidentWhenConnected() {
   if (model.get(`${connectionId}_conn_status`) !== 'on') return;
-  const cookie = getCookieForInstance();
-  if (!cookie) return;
-  const url = getInstanceUrl() + '/api/now/table/incident?sysparm_limit=1';
-  const result = await httpGet(url, cookie);
+  const result = await httpGet(instanceUrl + '/api/now/table/incident?sysparm_limit=1');
   console.log(result.statusCode, result.finalUrl);
 }
 ```
 
-Summary: set `${id}_url` and `${id}_validationInterval`, create a `Connection({ id })`, run the browser and cookie sync so the model gets `${id}_browser_cookies`. For HTTP, read the cookie string for the instance’s domain from the model and pass it as the second argument to `httpGet(url, cookie)` (or set the `Cookie` header in your own client).
+Summary: set `${id}_url` and `${id}_validationInterval`, create a `Connection({ id })`, run the browser and browser sync so the model gets **browser_cookies** and **browser_g_cks**. Call `httpGet(url)`; Cookie and X-UserToken are resolved from the model by the URL's hostname.
 
 ## run.js – example / demo
 
@@ -101,14 +75,14 @@ Summary: set `${id}_url` and `${id}_validationInterval`, create a `Connection({ 
 - Starts one model-manager **monitor** on port 3031.
 - Creates a single Connection (id `0`) for a configurable ServiceNow instance URL.
 - Launches a Puppeteer browser with two tabs: the monitor UI, and the instance (or mock).
-- Starts cookie sync so connection state follows login/logout in the browser.
+- Starts browser sync so connection state follows login/logout in the browser.
 
 You can adapt it for your own use:
 
 1. **Your instance** – Set `instanceUrl` at the top to your ServiceNow instance (e.g. `https://your-instance.service-now.com`). There is a comment in the file: *Update the URL to your ServiceNow instance*.
 2. **Browser** – By default the script uses Puppeteer’s bundled Chromium. To use Chrome or Firefox, uncomment the corresponding `browserPath` line (macOS/Windows examples are in the file).
 
-With `node run` (or `npm start`) running, open the **monitor** in your browser at **http://localhost:3031**. You’ll see the shared model, including keys like `0_conn_status`, `0_browser_cookies`, `0_last_activity`. Log in to the ServiceNow instance in the other tab; connection turns **on** and last activity is set. Log out (or clear the session cookie); connection turns **off**. The monitor shows how connection state changes as you log in and out.
+With `node run` (or `npm start`) running, open the **monitor** in your browser at **http://localhost:3031**. You’ll see the shared model, including keys like `0_conn_status`, `browser_cookies`, `0_last_activity`. Log in to the ServiceNow instance in the other tab; connection turns **on** and last activity is set. Log out (or clear the session cookie); connection turns **off**. The monitor shows how connection state changes as you log in and out.
 
 ## Integration tests
 
@@ -121,5 +95,5 @@ If the mock server is not running, the integration specs will fail with a messag
 
 ## Scripts
 
-- `npm start` – Runs `node run.js` (demo with mock, monitor, browser, and cookie sync).
+- `npm start` – Runs `node run.js` (demo with mock, monitor, browser, and browser sync).
 - `npm test` – Runs Jasmine (unit and integration). Start `node run` first for integration tests.

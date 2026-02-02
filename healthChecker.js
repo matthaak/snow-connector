@@ -1,7 +1,7 @@
 /**
  * Real health checker for ServiceNow instance.
  * Checks /nav_to.do?uri=sys.scripts.do, follows redirects; success = final path ends with "sys.scripts.do".
- * Uses cookies from ${id}_browser_cookies for the target domain; fails immediately if none.
+ * httpGet resolves Cookie and X-UserToken from the model by URL hostname.
  * On success, updates ${id}_last_activity.
  */
 
@@ -52,40 +52,20 @@ class HealthChecker {
 
   /**
    * Performs health check for the connection (uses id from constructor).
+   * Cookie and X-UserToken are resolved by httpGet from the model.
    * @returns {Promise<boolean>} true if health check passed, false otherwise
    */
   async doCheck() {
-    const id = this.id;
-    const cookiesKey = `${id}_browser_cookies`;
-    const urlKey = `${id}_url`;
-    const lastActivityKey = `${id}_last_activity`;
-
-    const cookiesObj = this.model.get(cookiesKey);
-    if (!cookiesObj || typeof cookiesObj !== 'object' || cookiesObj === null) {
-      return false;
-    }
-
-    const url = this.model.get(urlKey);
-    const fqdn = extractFqdn(url);
-    if (!fqdn) {
-      return false;
-    }
-
-    const cookie = cookiesObj[fqdn];
-    if (!cookie || typeof cookie !== 'string') {
-      return false;
-    }
-
+    const url = this.model.get(`${this.id}_url`);
     const healthUrl = buildHealthCheckUrl(url);
     if (!healthUrl) {
       return false;
     }
-
     try {
-      const { finalUrl } = await httpGet(healthUrl, cookie);
+      const { finalUrl } = await httpGet(healthUrl);
       const ok = pathEndsWithSuccessSuffix(finalUrl);
       if (ok) {
-        this.model.set(lastActivityKey, Date.now());
+        this.model.set(`${this.id}_last_activity`, Date.now());
       }
       return ok;
     } catch (e) {

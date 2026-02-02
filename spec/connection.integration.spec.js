@@ -76,7 +76,7 @@ describe('Connection (integration)', () => {
       const cookie = await getSessionCookieFromIndex();
       expect(cookie).toBeTruthy();
 
-      model.set(`${id}_browser_cookies`, { [HOST]: cookie });
+      model.set('browser_cookies', { [HOST]: cookie });
 
       connection = new Connection({ id });
       const result = await connection.connect();
@@ -89,7 +89,7 @@ describe('Connection (integration)', () => {
     });
 
     it('fails immediately when no cookies for domain', async () => {
-      model.set(`${id}_browser_cookies`, {});
+      model.set('browser_cookies', {});
 
       connection = new Connection({ id });
       const result = await connection.connect();
@@ -99,7 +99,7 @@ describe('Connection (integration)', () => {
     });
 
     it('fails when cookie has no glide_session_store', async () => {
-      model.set(`${id}_browser_cookies`, { [HOST]: 'other=value' });
+      model.set('browser_cookies', { [HOST]: 'other=value' });
 
       connection = new Connection({ id });
       const result = await connection.connect();
@@ -109,7 +109,7 @@ describe('Connection (integration)', () => {
     });
 
     it('fails when cookie is invalid (session not in mock)', async () => {
-      model.set(`${id}_browser_cookies`, { [HOST]: 'glide_session_store=invalid-session-id' });
+      model.set('browser_cookies', { [HOST]: 'glide_session_store=invalid-session-id' });
 
       connection = new Connection({ id });
       const result = await connection.connect();
@@ -125,7 +125,7 @@ describe('Connection (integration)', () => {
       expect(cookie).toBeTruthy();
 
       connection = new Connection({ id });
-      model.set(`${id}_browser_cookies`, { [HOST]: cookie });
+      model.set('browser_cookies', { [HOST]: cookie });
 
       await new Promise((r) => setImmediate(r));
 
@@ -136,7 +136,7 @@ describe('Connection (integration)', () => {
   describe('Method Q: disconnect()', () => {
     it('turns off when disconnect() is called after connect()', async () => {
       const cookie = await getSessionCookieFromIndex();
-      model.set(`${id}_browser_cookies`, { [HOST]: cookie });
+      model.set('browser_cookies', { [HOST]: cookie });
 
       connection = new Connection({ id });
       await connection.connect();

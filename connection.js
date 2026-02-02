@@ -7,7 +7,7 @@
  * Connection Methods (turning "on"):
  * - Method A: Automatically turns on when browser cookies for the connection's domain
  *   change from not having glide_session_store to having it, or when the glide_session_store
- *   value changes. Monitors ${id}_browser_cookies object (domain -> cookie string mapping).
+ *   value changes. Monitors browser_cookies object (domain -> cookie string mapping).
  *   Handled by handleModelChange().
  * - Method B: Manually turns on via connect() method. Requires health check to pass.
  * 
@@ -18,7 +18,7 @@
  * - Method Q: Manually disconnects via disconnect() method.
  * - Method R: Automatically disconnects when browser cookies for the connection's domain
  *   change from having glide_session_store to not having it (or being deleted).
- *   Monitors ${id}_browser_cookies object. Handled by handleModelChange().
+ *   Monitors browser_cookies object. Handled by handleModelChange().
  */
 
 const {
@@ -42,7 +42,7 @@ class Connection {
     this.statusKey = statusKey;
     this.urlKey = `${id}_url`;
     this.validationIntervalKey = `${id}_validationInterval`;
-    this.cookiesKey = `${id}_browser_cookies`; // Object: domain -> cookie string
+    this.cookiesKey = 'browser_cookies'; // Object: domain -> cookie string
     this.sessionStoreKey = `${id}_conn_glide_session_store`;
     this.lastActivityKey = `${id}_last_activity`;
 
