@@ -28,9 +28,7 @@ console.log(`Monitor at http://localhost:${MONITOR_PORT}`);
 
 // Connection for the ServiceNow instance (id 0)
 const connectionId = 0;
-model.set(`${connectionId}_url`, instanceUrl);
-model.set(`${connectionId}_validationInterval`, 15000);
-const connection = new Connection({ id: connectionId });
+const connection = new Connection({ id: connectionId, instanceUrl });
 
 async function main() {
   const provider = getBrowserProvider();

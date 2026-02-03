@@ -6,7 +6,8 @@
 
 const http = require('http');
 const { Connection } = require('../connection');
-const { setModelProvider } = require('../providers.js');
+const { setModelProvider, setHealthCheckerFactory } = require('../providers.js');
+const { HealthChecker } = require('../healthChecker.js');
 const { PORT } = require('./support/check-mock-server.js');
 
 const { ObservableModel } = require('model-manager/observable-model');
@@ -51,12 +52,13 @@ describe('Connection (integration)', () => {
   beforeAll(() => {
     model = new ObservableModel();
     setModelProvider({ getModel: () => model });
+    // Use real HealthChecker; connection.spec.js sets a mock and never restores it,
+    // so without this the integration tests would flakily use that mock when run after unit tests.
+    setHealthCheckerFactory({ create: (id) => new HealthChecker(id) });
   });
 
   beforeEach(() => {
     if (model.reset) model.reset();
-    model.set(`${id}_url`, BASE_URL);
-    model.set(`${id}_validationInterval`, 10000);
     model.set(`${id}_conn_status`, 'off');
     if (connection) {
       connection.disconnect();
@@ -78,7 +80,7 @@ describe('Connection (integration)', () => {
 
       model.set('browser_cookies', { [HOST]: cookie });
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       const result = await connection.connect();
 
       expect(result).toBe(true);
@@ -91,7 +93,7 @@ describe('Connection (integration)', () => {
     it('fails immediately when no cookies for domain', async () => {
       model.set('browser_cookies', {});
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       const result = await connection.connect();
 
       expect(result).toBe(false);
@@ -101,7 +103,7 @@ describe('Connection (integration)', () => {
     it('fails when cookie has no glide_session_store', async () => {
       model.set('browser_cookies', { [HOST]: 'other=value' });
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       const result = await connection.connect();
 
       expect(result).toBe(false);
@@ -111,7 +113,7 @@ describe('Connection (integration)', () => {
     it('fails when cookie is invalid (session not in mock)', async () => {
       model.set('browser_cookies', { [HOST]: 'glide_session_store=invalid-session-id' });
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       const result = await connection.connect();
 
       expect(result).toBe(false);
@@ -124,7 +126,7 @@ describe('Connection (integration)', () => {
       const cookie = await getSessionCookieFromIndex();
       expect(cookie).toBeTruthy();
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       model.set('browser_cookies', { [HOST]: cookie });
 
       await new Promise((r) => setImmediate(r));
@@ -138,7 +140,7 @@ describe('Connection (integration)', () => {
       const cookie = await getSessionCookieFromIndex();
       model.set('browser_cookies', { [HOST]: cookie });
 
-      connection = new Connection({ id });
+      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
       await connection.connect();
       expect(model.get(`${id}_conn_status`)).toBe('on');
 

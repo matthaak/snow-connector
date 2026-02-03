@@ -15,7 +15,7 @@ So: **browser session → browser sync → model → Connection state and cookie
 ## What it provides
 
 - **Connection** – A class that manages connection state per instance (by `id`). It turns **on** when browser cookies for that instance’s domain include `glide_session_store` (e.g. user logs in in a Puppeteer-controlled browser), or when you call `connect()` after a successful health check. It turns **off** when the session cookie disappears (e.g. logout), when the health check fails after a period of inactivity, or when you call `disconnect()`.
-- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_conn_glide_session_store`, `${id}_last_activity`. Global keys **browser_cookies** and **browser_g_cks** (domain → value) are updated by browser sync. Your app (or model-manager UI) can read and react to these.
+- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_conn_glide_session_store`, `${id}_last_activity`. Global keys **browser_cookies** and **browser_g_cks** (domain → value) are updated by browser sync. Your app (or model-manager UI) can read and react to these. The Connection constructor sets `${id}_url` and `${id}_validationInterval` in the model from its `instanceUrl` and `validationInterval` (default 15000) arguments.
 - **Health checker** – Validates the session by requesting a known path (e.g. `/nav_to.do?uri=sys.scripts.do`) with the instance cookies and updates `${id}_last_activity` on success.
 - **Providers** – Pluggable model, browser, and health-checker factories so you can use your own model, a real Puppeteer browser, or mocks in tests.
 - **Browser sync** – Helpers to launch Chromium/Chrome or Firefox (with persistent profiles and password saving) and to sync browser state (cookies and g_ck) into the model on each page load so Connection can see login/logout.
@@ -47,9 +47,11 @@ provider.setExecutablePath(browserPath);
 // 2. Declare a connection for your ServiceNow instance
 const connectionId = 0;
 const instanceUrl = 'https://your-instance.service-now.com';
-model.set(`${connectionId}_url`, instanceUrl);
-model.set(`${connectionId}_validationInterval`, 60000); // ms between health checks when stale
-const connection = new Connection({ id: connectionId });
+const connection = new Connection({
+  id: connectionId,
+  instanceUrl,
+  validationInterval: 60000, // optional, defaults to 15000 ms between health checks when stale
+});
 
 // 3. Launch the browser and start syncing browser state on each page load (so Connection sees login/logout)
 async function startBrowser() {
@@ -65,7 +67,7 @@ async function fetchIncidentWhenConnected() {
 }
 ```
 
-Summary: set `${id}_url` and `${id}_validationInterval`, create a `Connection({ id })`, run the browser and browser sync so the model gets **browser_cookies** and **browser_g_cks**. Call `httpGet(url)`; Cookie and X-UserToken are resolved from the model by the URL's hostname.
+Summary: create a `Connection({ id, instanceUrl, validationInterval? })`, run the browser and browser sync so the model gets **browser_cookies** and **browser_g_cks**. Call `httpGet(url)`; Cookie and X-UserToken are resolved from the model by the URL's hostname. `validationInterval` defaults to 15000 ms if omitted.
 
 ## run.js – example / demo
 

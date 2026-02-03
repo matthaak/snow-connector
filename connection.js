@@ -28,7 +28,7 @@ const {
 } = require('./providers.js');
 
 class Connection {
-  constructor({ id }) {
+  constructor({ id, instanceUrl, validationInterval = 15000 }) {
     this.id = id;
     this.model = getModelProvider().getModel();
     this.browser = getBrowserProvider().getBrowser();
@@ -42,6 +42,10 @@ class Connection {
     this.statusKey = statusKey;
     this.urlKey = `${id}_url`;
     this.validationIntervalKey = `${id}_validationInterval`;
+
+    // Populate model with connection config
+    this.model.set(this.urlKey, instanceUrl);
+    this.model.set(this.validationIntervalKey, validationInterval);
     this.cookiesKey = 'browser_cookies'; // Object: domain -> cookie string
     this.sessionStoreKey = `${id}_conn_glide_session_store`;
     this.lastActivityKey = `${id}_last_activity`;
