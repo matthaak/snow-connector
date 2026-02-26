@@ -88,7 +88,7 @@ async function launch(options = {}) {
   configurePasswordSaving(userDataDir);
 
   const launchOptions = {
-    headless: false,
+    headless: options.headless !== undefined ? options.headless : false,
     timeout: 60000,
     userDataDir,
     ignoreDefaultArgs: ['--enable-automation'],

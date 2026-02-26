@@ -1,4 +1,4 @@
-const model = require('model-manager/model');
+const { model } = require('model-manager');
 
 let modelProvider = { getModel() { return model; } };
 
@@ -44,6 +44,7 @@ function createDefaultBrowserProvider() {
         executablePath: executablePath || undefined,
         initialUrl: options.initialUrl,
         userDataDir: options.userDataDir,
+        headless: options.headless,
       };
 
       browserInstance = await wrapper.launch(launchOptions);

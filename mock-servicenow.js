@@ -59,6 +59,14 @@ function handleRequest(model, req, res) {
       return;
     }
 
+    // Test helper: invalidate session so integration tests can assert connect() fails with invalid/expired session
+    if (pathname === '/test/invalidate-session' && req.method === 'GET') {
+      model.set(SESSION_KEY, null);
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OK');
+      return;
+    }
+
     if (pathname === '/logout.do' && req.method === 'GET') {
       model.set(SESSION_KEY, null);
 

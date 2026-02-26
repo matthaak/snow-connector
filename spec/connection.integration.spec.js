@@ -1,69 +1,113 @@
 /**
- * Integration specs for Connection using mock ServiceNow, real HealthChecker, and real model.
- * Require the mock server to be running on localhost:3099 (e.g. `node run.js`).
- * Run with: npm test (with mock server running)
+ * Integration spec for the full login/logout lifecycle with real browser + mock server.
+ * Requires mock server on localhost:3099 (run `node run` first).
  */
 
 const http = require('http');
 const { Connection } = require('../connection');
-const { setModelProvider, setHealthCheckerFactory } = require('../providers.js');
+const {
+  setModelProvider,
+  setBrowserProvider,
+  getBrowserProvider,
+  setHealthCheckerFactory,
+  createDefaultBrowserProvider,
+} = require('../providers.js');
 const { HealthChecker } = require('../healthChecker.js');
 const { PORT } = require('./support/check-mock-server.js');
+const { ObservableModel } = require('model-manager');
 
-const { ObservableModel } = require('model-manager/observable-model');
+let browserPath = null;
+browserPath = '/Applications/Firefox.app/Contents/MacOS/firefox';
 
 const HOST = '127.0.0.1';
 const BASE_URL = `http://${HOST}:${PORT}`;
+const HEALTH_URL = `${BASE_URL}/nav_to.do?uri=sys.scripts.do`;
 
-function getSessionCookieFromIndex() {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        hostname: HOST,
-        port: PORT,
-        path: '/index.do',
-        method: 'GET',
-      },
-      (res) => {
-        const setCookie = res.headers['set-cookie'];
-        if (!setCookie) {
-          resolve(null);
-          return;
-        }
-        const header = Array.isArray(setCookie) ? setCookie[0] : setCookie;
-        const match = header.match(/glide_session_store=([^;]+)/);
-        resolve(match ? `glide_session_store=${match[1].trim()}` : null);
-      }
-    );
-    req.on('error', reject);
-    req.setTimeout(2000, () => {
-      req.destroy();
-      reject(new Error('Request timeout'));
-    });
-    req.end();
-  });
-}
-
-describe('Connection (integration)', () => {
+describe('Connection (integration): managed/unmanaged lifecycle', () => {
   let model;
   let connection;
-  const id = 0;
+  let browserLaunchFailed = false;
 
-  beforeAll(() => {
+  async function httpGet(url) {
+    await new Promise((resolve, reject) => {
+      const req = http.get(url, (res) => {
+        res.resume();
+        resolve();
+      });
+      req.on('error', reject);
+    });
+  }
+
+  async function closeAllPages() {
+    const browser = getBrowserProvider().getBrowser();
+    if (!browser || typeof browser.pages !== 'function') return;
+    const pages = await browser.pages();
+    for (const p of pages) {
+      if (!p.isClosed()) await p.close().catch(() => {});
+    }
+  }
+
+  async function clearDomainCookies() {
+    const browser = getBrowserProvider().getBrowser();
+    if (!browser || typeof browser.pages !== 'function') return;
+    const pages = await browser.pages();
+    for (const p of pages) {
+      if (p.isClosed()) continue;
+      try {
+        const cookies = await p.cookies();
+        const toDelete = cookies.filter((c) => c.domain && (c.domain === HOST || c.domain === `.${HOST}`));
+        if (toDelete.length) await p.deleteCookie(...toDelete);
+      } catch (_) {
+        // ignore
+      }
+    }
+  }
+
+  async function waitForStatus(id, expected, timeoutMs = 5000) {
+    const statusKey = `${id}_conn_status`;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (model.get(statusKey) === expected) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`Timed out waiting for ${statusKey}=${expected}; actual=${model.get(statusKey)}`);
+  }
+
+  const skipIfNoBrowser = (fn) => function wrapped() {
+    if (browserLaunchFailed) {
+      pending('Browser not available');
+      return;
+    }
+    return fn.apply(this, arguments);
+  };
+
+  beforeAll(async () => {
     model = new ObservableModel();
     setModelProvider({ getModel: () => model });
-    // Use real HealthChecker; connection.spec.js sets a mock and never restores it,
-    // so without this the integration tests would flakily use that mock when run after unit tests.
-    setHealthCheckerFactory({ create: (id) => new HealthChecker(id) });
-  });
+    setHealthCheckerFactory({ create: (cid) => new HealthChecker(cid) });
+    setBrowserProvider(createDefaultBrowserProvider());
 
-  beforeEach(() => {
-    if (model.reset) model.reset();
-    model.set(`${id}_conn_status`, 'off');
+    try {
+      const provider = getBrowserProvider();
+      if (browserPath) provider.setExecutablePath(browserPath);
+      await provider.launch({ headless: true });
+    } catch (err) {
+      browserLaunchFailed = true;
+      console.warn('Connection integration tests skipped: browser launch failed', err.message);
+    }
+  }, 60000);
+
+  beforeEach(async () => {
     if (connection) {
       connection.disconnect();
       connection = null;
     }
+    if (browserLaunchFailed) return;
+    await httpGet(`${BASE_URL}/test/invalidate-session`);
+    await closeAllPages();
+    await clearDomainCookies();
+    model.reset();
+    setModelProvider({ getModel: () => model });
   });
 
   afterEach(() => {
@@ -73,79 +117,56 @@ describe('Connection (integration)', () => {
     }
   });
 
-  describe('Method B: connect() with real health checker', () => {
-    it('turns on when cookie is valid and health check passes (nav_to -> sys.scripts.do)', async () => {
-      const cookie = await getSessionCookieFromIndex();
-      expect(cookie).toBeTruthy();
-
-      model.set('browser_cookies', { [HOST]: cookie });
-
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      const result = await connection.connect();
-
-      expect(result).toBe(true);
-      expect(model.get(`${id}_conn_status`)).toBe('on');
-      expect(model.get(`${id}_conn_glide_session_store`)).toBeTruthy();
-      expect(model.get(`${id}_last_activity`)).toBeTruthy();
-      expect(typeof model.get(`${id}_last_activity`)).toBe('number');
-    });
-
-    it('fails immediately when no cookies for domain', async () => {
-      model.set('browser_cookies', {});
-
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      const result = await connection.connect();
-
-      expect(result).toBe(false);
-      expect(model.get(`${id}_conn_status`)).toBe('off');
-    });
-
-    it('fails when cookie has no glide_session_store', async () => {
-      model.set('browser_cookies', { [HOST]: 'other=value' });
-
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      const result = await connection.connect();
-
-      expect(result).toBe(false);
-      expect(model.get(`${id}_conn_status`)).toBe('off');
-    });
-
-    it('fails when cookie is invalid (session not in mock)', async () => {
-      model.set('browser_cookies', { [HOST]: 'glide_session_store=invalid-session-id' });
-
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      const result = await connection.connect();
-
-      expect(result).toBe(false);
-      expect(model.get(`${id}_conn_status`)).toBe('off');
-    });
+  afterAll(async () => {
+    const browser = getBrowserProvider().getBrowser();
+    if (browser && browser.close) await browser.close().catch(() => {});
   });
 
-  describe('Method A: turn on via cookie change', () => {
-    it('turns on when cookie with glide_session_store is set for domain', async () => {
-      const cookie = await getSessionCookieFromIndex();
-      expect(cookie).toBeTruthy();
+  it('covers managed login/logout, unmanaged login, connect/disconnect/connect flow', skipIfNoBrowser(async () => {
+    connection = new Connection({ instanceUrl: BASE_URL, validationInterval: 1000 });
 
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      model.set('browser_cookies', { [HOST]: cookie });
+    // CONNECT -> off (health path does not succeed without login)
+    const firstConnect = await connection.connect();
+    expect(firstConnect).toBe(false);
+    expect(connection.isOn()).toBe(false);
+    expect(model.get(`${connection.id}_conn_status`)).toBe('off');
+    expect(connection.workerPage).toBeTruthy();
+    expect(connection.workerPage.isClosed()).toBe(false);
 
-      await new Promise((r) => setImmediate(r));
+    // DO MANAGED LOGIN -> on
+    await connection.workerPage.goto(`${BASE_URL}/index.do`, { waitUntil: 'load', timeout: 10000 });
+    await connection.workerPage.goto(HEALTH_URL, { waitUntil: 'load', timeout: 10000 });
+    await waitForStatus(connection.id, 'on');
+    expect(connection.isOn()).toBe(true);
 
-      expect(model.get(`${id}_conn_status`)).toBe('on');
-    });
-  });
+    // DO MANAGED LOGOUT -> off
+    await connection.workerPage.goto(`${BASE_URL}/logout.do`, { waitUntil: 'load', timeout: 10000 });
+    await waitForStatus(connection.id, 'off');
+    expect(connection.isOn()).toBe(false);
 
-  describe('Method Q: disconnect()', () => {
-    it('turns off when disconnect() is called after connect()', async () => {
-      const cookie = await getSessionCookieFromIndex();
-      model.set('browser_cookies', { [HOST]: cookie });
+    // DO UNMANAGED LOGIN -> still off
+    const browser = getBrowserProvider().getBrowser();
+    const unmanagedPage = await browser.newPage();
+    await unmanagedPage.goto(`${BASE_URL}/index.do`, { waitUntil: 'load', timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(connection.isOn()).toBe(false);
+    expect(model.get(`${connection.id}_conn_status`)).toBe('off');
 
-      connection = new Connection({ id, instanceUrl: BASE_URL, validationInterval: 10000 });
-      await connection.connect();
-      expect(model.get(`${id}_conn_status`)).toBe('on');
+    // CONNECT -> on (managed tab loads success path with existing session)
+    const secondConnect = await connection.connect();
+    expect(secondConnect).toBe(true);
+    await waitForStatus(connection.id, 'on');
+    expect(connection.isOn()).toBe(true);
 
-      connection.disconnect();
-      expect(model.get(`${id}_conn_status`)).toBe('off');
-    });
-  });
+    // DISCONNECT -> off (session remains in browser)
+    connection.disconnect();
+    await waitForStatus(connection.id, 'off');
+    expect(connection.isOn()).toBe(false);
+
+    // CONNECT again -> on (same session, no new login)
+    const thirdConnect = await connection.connect();
+    expect(thirdConnect).toBe(true);
+    await waitForStatus(connection.id, 'on');
+    expect(connection.isOn()).toBe(true);
+  }), 120000);
 });

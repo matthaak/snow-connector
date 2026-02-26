@@ -1,24 +1,21 @@
 // connection.js
 /**
  * Connection class manages connection state to a ServiceNow instance.
- * 
- * Connection obtains model and browser from providers, and health checker from a factory.
- * 
+ *
+ * Connection uses a single worker tab for login, health checks, and consumer requests.
+ * Consumers use connection.fetch() (or getWorkerPage()) and can reset to HEALTH_PATH via reset().
+ * Health checking uses the same worker tab and runs at validationInterval.
+ *
  * Connection Methods (turning "on"):
- * - Method A: Automatically turns on when browser cookies for the connection's domain
- *   change from not having glide_session_store to having it, or when the glide_session_store
- *   value changes. Monitors browser_cookies object (domain -> cookie string mapping).
- *   Handled by handleModelChange().
- * - Method B: Manually turns on via connect() method. Requires health check to pass.
- * 
+ * - Method A: Attempts health check when cookies for the connection domain change;
+ *   turns on when the health path succeeds. Handled by handleModelChange().
+ * - Method B: Manually turns on via connect() / ensureHealthTab() when health check passes.
+ *
  * Disconnection Methods (turning "off"):
- * - Method P: Automatically disconnects via validation loop when health check fails
- *   after detecting stale activity (last activity >= validationInterval ms ago).
- *   Handled by startValidationLoop().
+ * - Method P: Health check via worker fetch reports failure (e.g. redirect to logout);
+ *   connection status is set off and periodic check is stopped.
  * - Method Q: Manually disconnects via disconnect() method.
- * - Method R: Automatically disconnects when browser cookies for the connection's domain
- *   change from having glide_session_store to not having it (or being deleted).
- *   Monitors browser_cookies object. Handled by handleModelChange().
+ * - Method R: Periodic health checks detect logout/invalid session and turn off on failure.
  */
 
 const {
@@ -26,40 +23,120 @@ const {
   getBrowserProvider,
   getHealthCheckerFactory,
 } = require('./providers.js');
+const { buildHealthCheckUrl, pathEndsWithSuccessSuffix } = require('./healthChecker.js');
+
+const MODEL_NEXT_ID_KEY = '_snow_connector_next_id';
+
+function getNextConnectionId(model) {
+  const next = model.get(MODEL_NEXT_ID_KEY);
+  const id = next != null && Number.isFinite(next) ? next : 0;
+  model.set(MODEL_NEXT_ID_KEY, id + 1);
+  return id;
+}
 
 class Connection {
-  constructor({ id, instanceUrl, validationInterval = 15000 }) {
-    this.id = id;
+  constructor({
+    instanceUrl,
+    validationInterval = 15000,
+    browserProvider = getBrowserProvider(),
+  }) {
     this.model = getModelProvider().getModel();
-    this.browser = getBrowserProvider().getBrowser();
-    this.healthChecker = getHealthCheckerFactory().create(id);
+    this.id = getNextConnectionId(this.model);
+    this.healthChecker = getHealthCheckerFactory().create(this.id);
+    this.browserProvider = browserProvider;
 
     // Initialize connection status
-    const statusKey = `${id}_conn_status`;
+    const statusKey = `${this.id}_conn_status`;
     this.model.set(statusKey, 'off');
 
     // Store key names for convenience (url and validationInterval read from model)
     this.statusKey = statusKey;
-    this.urlKey = `${id}_url`;
-    this.validationIntervalKey = `${id}_validationInterval`;
+    this.urlKey = `${this.id}_url`;
+    this.validationIntervalKey = `${this.id}_validationInterval`;
 
     // Populate model with connection config
     this.model.set(this.urlKey, instanceUrl);
     this.model.set(this.validationIntervalKey, validationInterval);
     this.cookiesKey = 'browser_cookies'; // Object: domain -> cookie string
-    this.sessionStoreKey = `${id}_conn_glide_session_store`;
-    this.lastActivityKey = `${id}_last_activity`;
+    this.lastActivityKey = `${this.id}_last_activity`;
 
-    // Track validation interval timer
-    this.validationTimer = null;
+    // Single worker tab used for login/health/consumer fetches.
+    this.workerPage = null;
+    this.workerPagesWithLoadListener = new WeakSet();
+    this.suppressCookieDrivenChecks = false;
+
+    if (this.healthChecker && typeof this.healthChecker.setWorkerPageProvider === 'function') {
+      this.healthChecker.setWorkerPageProvider(this._getOrCreateWorkerPage.bind(this));
+    }
+    if (this.healthChecker && typeof this.healthChecker.setWorkerFetchProvider === 'function') {
+      this.healthChecker.setWorkerFetchProvider(this._workerFetch.bind(this));
+    }
+    this.initializationPromise = this._initializeBrowserAndWorker();
 
     // Listen for browser cookies changes
     this.model.on('change', this.handleModelChange.bind(this));
   }
 
+  async _initializeBrowserAndWorker() {
+    try {
+      const provider = this.browserProvider;
+      let browser = provider && typeof provider.getBrowser === 'function'
+        ? provider.getBrowser()
+        : null;
+      const connected = browser && typeof browser.isConnected === 'function' && browser.isConnected();
+      const healthUrl = buildHealthCheckUrl(this.getBaseURL()) || this.getBaseURL();
+      if (!connected && provider && typeof provider.launch === 'function') {
+        await provider.launch({ initialUrl: healthUrl || undefined });
+        browser = provider.getBrowser();
+        if (browser && typeof browser.pages === 'function') {
+          const pages = await browser.pages().catch(() => []);
+          const firstOpenPage = pages.find((page) => page && typeof page.isClosed === 'function' && !page.isClosed());
+          if (firstOpenPage) {
+            this.workerPage = firstOpenPage;
+            this._attachWorkerPageLoadListener(this.workerPage);
+            await this._syncBrowserStateFromWorkerPage(this.workerPage);
+          }
+        }
+      }
+      if (this.healthChecker && typeof this.healthChecker.ensureHealthTab === 'function') {
+        await Promise.resolve(this.healthChecker.ensureHealthTab());
+      }
+    } catch (e) {
+      // Keep connection down; methods can retry creating the worker tab later.
+    }
+  }
+
+  async ready() {
+    await this._ensureInitialized();
+  }
+
+  async _ensureInitialized() {
+    if (!this.initializationPromise) {
+      return;
+    }
+    await this.initializationPromise;
+  }
+
   getUrlFqdn() {
     const url = this.model.get(this.urlKey);
     return this.extractFqdn(url);
+  }
+
+  /**
+   * Returns true when this connection's status is currently on.
+   * @returns {boolean}
+   */
+  isOn() {
+    return this.model.get(this.statusKey) === 'on';
+  }
+
+  /**
+   * Returns this connection's configured base URL from the model.
+   * @returns {string|null}
+   */
+  getBaseURL() {
+    const url = this.model.get(this.urlKey);
+    return typeof url === 'string' && url ? url : null;
   }
 
   /**
@@ -86,8 +163,9 @@ class Connection {
     if (event.key !== this.cookiesKey) {
       return;
     }
-
-    const isCurrentlyOn = this.model.get(this.statusKey) === 'on';
+    if (this.suppressCookieDrivenChecks) {
+      return;
+    }
 
     // Get the cookies object (domain -> cookie string mapping)
     const newCookiesObj = event.newValue || {};
@@ -102,85 +180,270 @@ class Connection {
       ? oldCookiesObj[urlFqdn] 
       : null;
 
-    // Extract glide_session_store from new cookie (for this domain)
-    let newSessionStore = null;
-    if (newCookieValue && typeof newCookieValue === 'string') {
-      const sessionStoreMatch = newCookieValue.match(/glide_session_store=([^;]+)/);
-      if (sessionStoreMatch) {
-        newSessionStore = sessionStoreMatch[1];
-      }
-    }
-
-    // Extract glide_session_store from old cookie (for this domain)
-    let oldSessionStore = null;
-    if (oldCookieValue && typeof oldCookieValue === 'string') {
-      const sessionStoreMatch = oldCookieValue.match(/glide_session_store=([^;]+)/);
-      if (sessionStoreMatch) {
-        oldSessionStore = sessionStoreMatch[1];
-      }
-    }
-
-    // Method R: Handle disconnection when cookie for this domain goes from having glide_session_store to not having it
-    if (isCurrentlyOn && oldSessionStore !== null && newSessionStore === null) {
-      this.model.set(this.statusKey, 'off');
-      this.stopValidationLoop();
+    // Only react when this connection domain's cookie value changed, and only while off.
+    if (this.isOn() || newCookieValue === oldCookieValue) {
       return;
     }
 
-    // Don't process turn-on logic if already on
-    if (isCurrentlyOn) {
-      return;
+    if (this.healthChecker && typeof this.healthChecker.doCheck === 'function') {
+      Promise.resolve(this.healthChecker.doCheck()).then((ok) => {
+        if (ok && !this.isOn()) {
+          this.model.set(this.statusKey, 'on');
+          this.model.set(this.lastActivityKey, Date.now());
+          if (typeof this.healthChecker.startPeriodicCheck === 'function') {
+            this.healthChecker.startPeriodicCheck();
+          }
+        }
+      }).catch(() => {});
     }
+  }
 
-    // If new cookie has glide_session_store, store it
-    if (newSessionStore) {
-      this.model.set(this.sessionStoreKey, newSessionStore);
+  /**
+   * Ensures the health/login tab exists and is on the instance health URL.
+   * Call after browser launch so the user has one tab to log in on.
+   * @returns {Promise<boolean>} true if tab is open and navigated
+   */
+  async ensureHealthTab() {
+    await this._ensureInitialized();
+    if (!this.healthChecker || typeof this.healthChecker.ensureHealthTab !== 'function') {
+      return false;
     }
-
-    // Method A: Turn on if (for this domain):
-    // 1. Old cookie had no glide_session_store (or was null) and new cookie has it, OR
-    // 2. Old cookie had a different glide_session_store value than new cookie
-    if (newSessionStore && (oldSessionStore === null || oldSessionStore !== newSessionStore)) {
+    const opened = await Promise.resolve(this.healthChecker.ensureHealthTab());
+    if (!opened) {
+      return false;
+    }
+    const page = await this._getOrCreateWorkerPage();
+    if (page && !page.isClosed() && pathEndsWithSuccessSuffix(page.url())) {
+      if (!this.isOn()) {
+        this.model.set(this.statusKey, 'on');
+      }
+      this.model.set(this.lastActivityKey, Date.now());
+      if (typeof this.healthChecker.startPeriodicCheck === 'function') {
+        this.healthChecker.startPeriodicCheck();
+      }
+      return true;
+    }
+    if (!this.healthChecker || typeof this.healthChecker.doCheck !== 'function') {
+      return opened;
+    }
+    const ok = await Promise.resolve(this.healthChecker.doCheck()).catch(() => false);
+    if (ok && !this.isOn()) {
       this.model.set(this.statusKey, 'on');
-      this.model.set(this.lastActivityKey, Date.now()); // stamp so validation loop can run; health checker will refresh on success
-      this.startValidationLoop();
+      this.model.set(this.lastActivityKey, Date.now());
+      if (typeof this.healthChecker.startPeriodicCheck === 'function') {
+        this.healthChecker.startPeriodicCheck();
+      }
+    }
+    return opened;
+  }
+
+  async _getOrCreateWorkerPage() {
+    const provider = this.browserProvider;
+    const browser = provider && typeof provider.getBrowser === 'function'
+      ? provider.getBrowser()
+      : null;
+    if (!browser || !browser.isConnected()) {
+      return null;
+    }
+    if (this.workerPage && !this.workerPage.isClosed()) {
+      this._attachWorkerPageLoadListener(this.workerPage);
+      return this.workerPage;
+    }
+    const instanceUrl = this.getBaseURL();
+    const healthUrl = buildHealthCheckUrl(instanceUrl);
+    if (!healthUrl) {
+      return null;
+    }
+    try {
+      this.workerPage = await browser.newPage();
+      this._attachWorkerPageLoadListener(this.workerPage);
+      await this.workerPage.goto(healthUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this._syncBrowserStateFromWorkerPage(this.workerPage);
+      return this.workerPage;
+    } catch (e) {
+      if (this.workerPage && !this.workerPage.isClosed()) {
+        await this.workerPage.close().catch(() => {});
+      }
+      this.workerPage = null;
+      return null;
+    }
+  }
+
+  _attachWorkerPageLoadListener(page) {
+    if (!page || this.workerPagesWithLoadListener.has(page) || typeof page.on !== 'function') {
+      return;
+    }
+    page.on('load', () => {
+      this._syncBrowserStateFromWorkerPage(page).catch(() => {});
+      const currentUrl = typeof page.url === 'function' ? page.url() : null;
+      const success = pathEndsWithSuccessSuffix(currentUrl);
+      if (success && !this.isOn()) {
+        this.model.set(this.statusKey, 'on');
+        this.model.set(this.lastActivityKey, Date.now());
+        if (this.healthChecker && typeof this.healthChecker.startPeriodicCheck === 'function') {
+          this.healthChecker.startPeriodicCheck();
+        }
+        return;
+      }
+      if (!success && this.isOn()) {
+        this.model.set(this.statusKey, 'off');
+        this._stopHealthAndWorker();
+      }
+    });
+    this.workerPagesWithLoadListener.add(page);
+  }
+
+  async _syncBrowserStateFromWorkerPage(page) {
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      return;
+    }
+    const url = typeof page.url === 'function' ? page.url() : null;
+    const fqdn = this.extractFqdn(url);
+    if (!fqdn) {
+      return;
+    }
+
+    if (typeof page.cookies === 'function') {
+      try {
+        const cookies = await page.cookies();
+        const cookieString = Array.isArray(cookies)
+          ? cookies.map((c) => `${c.name}=${c.value || ''}`).join('; ')
+          : '';
+        const currentCookies = this.model.get(this.cookiesKey) || {};
+        this.suppressCookieDrivenChecks = true;
+        this.model.set(this.cookiesKey, { ...currentCookies, [fqdn]: cookieString });
+        this.suppressCookieDrivenChecks = false;
+      } catch (e) {
+        this.suppressCookieDrivenChecks = false;
+        // ignore
+      }
+    }
+
+    if (typeof page.evaluate === 'function') {
+      try {
+        const gck = await page.evaluate(() => {
+          try {
+            if (typeof window !== 'undefined' && typeof window.g_ck !== 'undefined') {
+              return window.g_ck != null ? String(window.g_ck) : null;
+            }
+            if (typeof globalThis !== 'undefined' && typeof globalThis.g_ck !== 'undefined') {
+              return globalThis.g_ck != null ? String(globalThis.g_ck) : null;
+            }
+            if (typeof g_ck !== 'undefined') {
+              return g_ck != null ? String(g_ck) : null;
+            }
+            return null;
+          } catch (err) {
+            return null;
+          }
+        });
+        if (gck != null) {
+          const currentGcks = this.model.get('browser_g_cks') || {};
+          this.model.set('browser_g_cks', { ...currentGcks, [fqdn]: gck });
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
+
+  async _workerFetch(url, options = {}, { requireOn = true } = {}) {
+    await this._ensureInitialized();
+    if (requireOn && !this.isOn()) {
+      throw new Error('Connection is off or worker page unavailable');
+    }
+    const page = requireOn ? await this.getWorkerPage() : await this._getOrCreateWorkerPage();
+    if (!page) {
+      throw new Error('Connection is off or worker page unavailable');
+    }
+    const init = {
+      method: (options.method || 'GET').toUpperCase(),
+      headers: options.headers && typeof options.headers === 'object' ? options.headers : {},
+      body: options.body != null ? String(options.body) : undefined,
+    };
+    return page.evaluate(
+      async ({ url: u, init: i }) => {
+        const res = await fetch(u, i);
+        const body = await res.text();
+        return {
+          ok: res.ok,
+          status: res.status,
+          statusText: res.statusText,
+          headers: Object.fromEntries(res.headers.entries()),
+          body,
+          finalUrl: res.url,
+        };
+      },
+      { url, init }
+    );
+  }
+
+  /**
+   * Returns the worker tab page for this connection. Creates it if connection is on and not yet created.
+   * @returns {Promise<import('puppeteer').Page|null>} The worker page or null if connection is off or browser unavailable
+   */
+  async getWorkerPage() {
+    await this._ensureInitialized();
+    if (!this.isOn()) {
+      return null;
+    }
+    return this._getOrCreateWorkerPage();
+  }
+
+  /**
+   * Runs fetch in the worker tab page context (same origin/cookies as the instance) and updates
+   * the model's last-activity timestamp on success.
+   * @param {string} url - URL to fetch (relative to instance or absolute)
+   * @param {{ method?: string, headers?: Record<string, string>, body?: string }} [options] - fetch init (method, headers, body)
+   * @returns {Promise<{ ok: boolean, status: number, statusText: string, headers: Record<string, string>, body: string }>} serialized response, or rejects if no worker page or fetch fails
+   */
+  async fetch(url, options = {}) {
+    const result = await this._workerFetch(url, options, { requireOn: true });
+    this.model.set(this.lastActivityKey, Date.now());
+    return result;
+  }
+
+  /**
+   * Navigates the worker tab to HEALTH_PATH. No-op if connection is off or worker page not created.
+   * @returns {Promise<void>}
+   */
+  async reset() {
+    if (!this.workerPage || this.workerPage.isClosed()) {
+      return;
+    }
+    const url = this.model.get(this.urlKey);
+    const healthUrl = buildHealthCheckUrl(url);
+    if (!healthUrl) {
+      return;
+    }
+    try {
+      await this.workerPage.goto(healthUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      // ignore
     }
   }
 
   /**
    * Method B: Manually connect the connection.
    * Requires health check to pass.
-   * Uses cookies for this connection's domain from browser_cookies object.
    * @returns {Promise<boolean>} Resolves with true if connection was turned on, false otherwise
    */
   async connect() {
-    const cookiesObj = this.model.get(this.cookiesKey);
-    if (!cookiesObj || typeof cookiesObj !== 'object' || cookiesObj === null) {
-      return false;
+    await this._ensureInitialized();
+    const ensured = await this.ensureHealthTab();
+    if (ensured && this.isOn()) {
+      return true;
     }
 
-    // Get cookie for this connection's domain
-    const urlFqdn = this.getUrlFqdn();
-    const cookie = cookiesObj[urlFqdn];
-    if (!cookie || typeof cookie !== 'string') {
-      return false;
-    }
-
-    // Check if cookie contains glide_session_store
-    const sessionStoreMatch = cookie.match(/glide_session_store=([^;]+)/);
-    if (!sessionStoreMatch) {
-      return false;
-    }
-
-    const sessionStore = sessionStoreMatch[1];
-
-    // Method B: Always perform health check (supports sync or async doCheck)
+    // Method B: Perform health check via worker fetch; on success start periodic check
     if (this.healthChecker && typeof this.healthChecker.doCheck === 'function') {
       const ok = await Promise.resolve(this.healthChecker.doCheck());
       if (ok) {
-        this.model.set(this.sessionStoreKey, sessionStore);
         this.model.set(this.statusKey, 'on');
-        this.startValidationLoop();
+        this.model.set(this.lastActivityKey, Date.now());
+        if (typeof this.healthChecker.startPeriodicCheck === 'function') {
+          this.healthChecker.startPeriodicCheck();
+        }
         return true;
       }
     }
@@ -193,62 +456,17 @@ class Connection {
    */
   disconnect() {
     this.model.set(this.statusKey, 'off');
-    this.stopValidationLoop();
+    this._stopHealthAndWorker();
   }
 
   /**
-   * Starts the validation loop that implements Method P.
-   * Checks every validationInterval ms if activity is stale and performs health check.
-   * Disconnects if health check fails.
+   * Stops health checker periodic check.
+   * The worker tab is intentionally left open so reconnect can reuse it.
+   * If the user manually closes it, a new tab is created on demand.
    */
-  startValidationLoop() {
-    // Stop any existing loop
-    this.stopValidationLoop();
-
-    // Only start if connection is on
-    if (this.model.get(this.statusKey) !== 'on') {
-      return;
-    }
-
-    const validationInterval = this.model.get(this.validationIntervalKey) || 0;
-    if (!validationInterval) {
-      return;
-    }
-
-    this.validationTimer = setInterval(() => {
-      // Check if connection is still on
-      if (this.model.get(this.statusKey) !== 'on') {
-        this.stopValidationLoop();
-        return;
-      }
-
-      const lastActivity = this.model.get(this.lastActivityKey);
-      if (!lastActivity) {
-        return;
-      }
-
-      const now = Date.now();
-      const timeSinceActivity = now - lastActivity;
-      const interval = this.model.get(this.validationIntervalKey) || 0;
-
-      // Method P: If last activity is at or before validationInterval ms ago, check health
-      if (timeSinceActivity >= interval) {
-        if (this.healthChecker && typeof this.healthChecker.doCheck === 'function') {
-          Promise.resolve(this.healthChecker.doCheck()).then((ok) => {
-            if (!ok) {
-              this.model.set(this.statusKey, 'off');
-              this.stopValidationLoop();
-            }
-          });
-        }
-      }
-    }, validationInterval);
-  }
-
-  stopValidationLoop() {
-    if (this.validationTimer) {
-      clearInterval(this.validationTimer);
-      this.validationTimer = null;
+  _stopHealthAndWorker() {
+    if (this.healthChecker && typeof this.healthChecker.stopPeriodicCheck === 'function') {
+      Promise.resolve(this.healthChecker.stopPeriodicCheck()).catch(() => {});
     }
   }
 }

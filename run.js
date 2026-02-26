@@ -1,5 +1,4 @@
-const model = require('model-manager/model');
-const { ModelManager } = require('model-manager/model-manager');
+const { model, ModelManager } = require('model-manager');
 const { startMockServiceNow } = require('./mock-servicenow.js');
 const { getBrowserProvider } = require('./providers.js');
 const { Connection } = require('./connection.js');
@@ -17,6 +16,7 @@ browserPath = '/Applications/Firefox.app/Contents/MacOS/firefox';
 // browserPath = 'C:\\Program Files\\Mozilla Firefox\\firefox.exe';
 
 const MONITOR_PORT = 3031;
+const monitorUrl = `http://localhost:${MONITOR_PORT}`;
 
 // Start mock ServiceNow instance (localhost:3099) - shares the same model
 startMockServiceNow(model);
@@ -24,27 +24,25 @@ startMockServiceNow(model);
 // One model manager (monitor) on port 3031
 const manager = new ModelManager(MONITOR_PORT, model);
 manager.start();
-console.log(`Monitor at http://localhost:${MONITOR_PORT}`);
+console.log(`Monitor at ${monitorUrl}`);
 
-// Connection for the ServiceNow instance (id 0)
-const connectionId = 0;
-const connection = new Connection({ id: connectionId, instanceUrl });
+const provider = getBrowserProvider();
+provider.setExecutablePath(browserPath);
+
+// Connection for the ServiceNow instance (id assigned sequentially by Connection).
+// Connection launches browser if needed and creates the login/worker tab.
+const connection = new Connection({
+  instanceUrl,
+  browserProvider: provider,
+});
 
 async function main() {
-  const provider = getBrowserProvider();
-  provider.setExecutablePath(browserPath);
-
-  const monitorUrl = `http://localhost:${MONITOR_PORT}`;
-  console.log('Launching browser...');
-  await provider.launch({ initialUrl: monitorUrl });
-
-  const browser = provider.getBrowser();
-  const secondPage = await browser.newPage();
-  await secondPage.goto(instanceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  console.log('Launching connection...');
+  await connection.ready();
 
   startBrowserSync();
 
-  console.log('Browser opened: monitor in first tab, ServiceNow instance in second. Press Ctrl-C to exit.');
+  console.log('Browser opened on the login/worker tab. Connection remains off until session is detected. Press Ctrl-C to exit.');
 }
 
 main().catch((err) => {
