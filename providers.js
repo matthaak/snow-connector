@@ -1,4 +1,4 @@
-const { model } = require('model-manager');
+const { model } = require('observable-state-model');
 
 let modelProvider = { getModel() { return model; } };
 

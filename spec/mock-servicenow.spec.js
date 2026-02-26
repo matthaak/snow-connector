@@ -1,4 +1,4 @@
-const { ObservableModel } = require('model-manager');
+const { ObservableModel } = require('observable-state-model');
 const {
   createMockServer,
   handleRequest,

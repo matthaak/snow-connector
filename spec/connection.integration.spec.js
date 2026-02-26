@@ -14,7 +14,7 @@ const {
 } = require('../providers.js');
 const { HealthChecker } = require('../healthChecker.js');
 const { PORT } = require('./support/check-mock-server.js');
-const { ObservableModel } = require('model-manager');
+const { ObservableModel } = require('observable-state-model');
 
 let browserPath = null;
 browserPath = '/Applications/Firefox.app/Contents/MacOS/firefox';

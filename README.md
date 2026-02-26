@@ -15,7 +15,7 @@ So: **browser session → browser sync → model → Connection state → worker
 ## What it provides
 
 - **Connection** – A class that manages connection state per instance. Each instance gets a numeric `id` assigned sequentially (from the model). It turns **on** when a health check succeeds (success path reached), including from `connect()` / `ensureHealthTab()`. It turns **off** when health checks fail after inactivity/redirect, or when you call `disconnect()`.
-- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_last_activity`. Global keys **browser_cookies** and **browser_g_cks** (domain → value) are updated by browser sync or worker-tab sync. Your app (or model-manager UI) can read and react to these. The Connection constructor assigns the next available `id` and sets `${id}_url` and `${id}_validationInterval` in the model from its `instanceUrl` and `validationInterval` (default 15000) arguments.
+- **Model keys** – For each connection `id`, the model holds: `${id}_conn_status` (`'on'` / `'off'`), `${id}_url`, `${id}_validationInterval`, `${id}_last_activity`. Global keys **browser_cookies** and **browser_g_cks** (domain → value) are updated by browser sync or worker-tab sync. Your app (or observable-state-model monitor UI) can read and react to these. The Connection constructor assigns the next available `id` and sets `${id}_url` and `${id}_validationInterval` in the model from its `instanceUrl` and `validationInterval` (default 15000) arguments.
 - **Health checker** – Runs through the worker fetch flow against the health path (e.g. `/nav_to.do?uri=sys.scripts.do`) at the connection’s validation interval. Success is detected when the final response URL path ends with the expected suffix; otherwise the connection is reported down and `${id}_last_activity` is updated on success.
 - **Worker tab and reset** – `connection.fetch(url, options)` runs `fetch` in the worker tab context and updates `${id}_last_activity` on success. `connection.getWorkerPage()` still returns the Puppeteer page when needed, and `connection.reset()` navigates it to the health path.
 - **Providers** – Pluggable model, browser, and health-checker factories so you can use your own model, a real Puppeteer browser, or mocks in tests.
@@ -25,7 +25,7 @@ So: **browser session → browser sync → model → Connection state → worker
 
 ### Declaring a connection and using the worker tab
 
-Assume a shared **model** (e.g. from `model-manager`). The default browser provider is created in `providers.js`; you get it with `getBrowserProvider()`, set the executable path, and pass it to `Connection`. Connection launches the browser if needed and creates the login/worker tab on the health path. If snow-connector is a dependency, use `require('snow-connector/...')`; if it’s the same repo, use relative paths (e.g. `require('./providers.js')`).
+Assume a shared **model** (e.g. from `observable-state-model`). The default browser provider is created in `providers.js`; you get it with `getBrowserProvider()`, set the executable path, and pass it to `Connection`. Connection launches the browser if needed and creates the login/worker tab on the health path. If snow-connector is a dependency, use `require('snow-connector/...')`; if it’s the same repo, use relative paths (e.g. `require('./providers.js')`).
 
 ```javascript
 const { getBrowserProvider } = require('snow-connector/providers.js');
@@ -65,10 +65,10 @@ async function useWorkerTab() {
 
 Summary: create a `Connection({ instanceUrl, validationInterval?, browserProvider? })`; the connection gets an `id` assigned from the model. Connection launches the browser if needed using the instance health URL as initial URL, creates/uses a login-worker tab on the health path, and syncs that worker tab’s cookies into the model for login detection. `startBrowserSync()` is optional if you also want model sync from other tabs/domains. When the connection is on, use `connection.fetch(url, options)` for API calls (updates `${id}_last_activity`) and use `connection.reset()` to navigate the worker tab to the health path. `validationInterval` defaults to 15000 ms if omitted.
 
-If you want to run a model-manager monitor listener, use the single package import:
+If you want to run an observable-state-model monitor listener, use the single package import:
 
 ```javascript
-const { model, ModelManager } = require('model-manager');
+const { model, ModelManager } = require('observable-state-model');
 new ModelManager(3031, model).start();
 ```
 
@@ -77,7 +77,7 @@ new ModelManager(3031, model).start();
 **run.js** is an **example/demo** script. It:
 
 - Starts a mock ServiceNow server on port 3099 (for trying the flow without a real instance).
-- Starts one model-manager **monitor** on port 3031.
+- Starts one observable-state-model **monitor** on port 3031.
 - Creates a single Connection for a configurable ServiceNow instance URL (its `id` is assigned sequentially).
 - Launches a Puppeteer browser to the instance login/worker tab (health path).
 - Starts browser sync so connection state follows login/logout in the browser.

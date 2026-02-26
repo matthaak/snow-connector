@@ -1,4 +1,4 @@
-const { model, ModelManager } = require('model-manager');
+const { model, ModelManager } = require('observable-state-model');
 const { startMockServiceNow } = require('./mock-servicenow.js');
 const { getBrowserProvider } = require('./providers.js');
 const { Connection } = require('./connection.js');
