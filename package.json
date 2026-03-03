@@ -1,12 +1,24 @@
 {
   "name": "snow-connector",
   "version": "1.0.0",
-  "description": "Snow Connector with Model Manager",
-  "main": "run.js",
+  "description": "Browser-based ServiceNow connection for Node without OAuth or service accounts",
+  "main": "index.js",
   "scripts": {
     "start": "node run.js",
     "test": "jasmine"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matthaak/snow-connector.git"
+  },
+  "keywords": [
+    "servicenow",
+    "puppeteer",
+    "browser-automation",
+    "sso",
+    "node"
+  ],
   "dependencies": {
     "observable-state-model": "^1.0.1",
     "puppeteer": "^23.0.0"

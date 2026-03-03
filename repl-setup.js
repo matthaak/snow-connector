@@ -3,7 +3,7 @@ const { getBrowserProvider } = require('./providers.js');
 const { Connection } = require('./connection.js');
 
 const MONITOR_PORT = 3031;
-const instanceUrl = 'https://dev224422.service-now.com';
+const instanceUrl = process.env.SNOW_CONNECTOR_DEMO_INSTANCE || 'https://your-instance.service-now.com';
 
 const provider = getBrowserProvider();
 provider.setExecutablePath('/Applications/Firefox.app/Contents/MacOS/firefox');

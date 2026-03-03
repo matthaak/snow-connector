@@ -7,9 +7,9 @@
  */
 
 const { getModelProvider } = require('./providers.js');
+const { randomUUID } = require('crypto');
 
-const HEALTH_PATH = '/nav_to.do?uri=sys.scripts.do';
-const SUCCESS_PATH_SUFFIX = 'sys.scripts.do';
+const HEALTH_TARGET_PATH = 'ws_blank_page.do';
 
 function extractFqdn(url) {
   if (!url || typeof url !== 'string') {
@@ -24,21 +24,51 @@ function extractFqdn(url) {
   }
 }
 
-function buildHealthCheckUrl(baseUrl) {
+function buildSuccessSuffix(connKey) {
+  if (!connKey || typeof connKey !== 'string') {
+    return null;
+  }
+  return `${HEALTH_TARGET_PATH}?${connKey}`;
+}
+
+function buildHealthCheckUrl(baseUrl, connKey) {
   if (!baseUrl || typeof baseUrl !== 'string') {
     return null;
   }
+  const successSuffix = buildSuccessSuffix(connKey);
+  if (!successSuffix) {
+    return null;
+  }
   const base = baseUrl.replace(/\/+$/, '');
-  return `${base}${HEALTH_PATH.startsWith('/') ? '' : '/'}${HEALTH_PATH}`;
+  const encodedUri = encodeURIComponent(successSuffix);
+  return `${base}/nav_to.do?uri=${encodedUri}`;
 }
 
-function pathEndsWithSuccessSuffix(finalUrl) {
+function pathEndsWithSuccessSuffix(finalUrl, successSuffix) {
   if (!finalUrl || typeof finalUrl !== 'string') {
     return false;
   }
+  if (!successSuffix || typeof successSuffix !== 'string') {
+    return false;
+  }
   try {
-    const pathname = new URL(finalUrl).pathname;
-    return pathname.endsWith(SUCCESS_PATH_SUFFIX);
+    const parsed = new URL(finalUrl);
+    const normalized = successSuffix.startsWith('/') ? successSuffix : `/${successSuffix}`;
+    const qIdx = normalized.indexOf('?');
+    if (qIdx < 0) {
+      return `${parsed.pathname}${parsed.search}`.endsWith(normalized);
+    }
+
+    const expectedPath = normalized.slice(0, qIdx);
+    const expectedKeyToken = normalized.slice(qIdx + 1);
+    if (!parsed.pathname.endsWith(expectedPath)) {
+      return false;
+    }
+
+    // Real ServiceNow pages may append extra query params. Treat success as:
+    // same success path + query string containing the current key token.
+    const query = parsed.search.startsWith('?') ? parsed.search.slice(1) : parsed.search;
+    return query.split('&').some((part) => part === expectedKeyToken || part.startsWith(`${expectedKeyToken}=`));
   } catch (e) {
     return false;
   }
@@ -48,26 +78,26 @@ class HealthChecker {
   constructor(id) {
     this.id = id;
     this.model = getModelProvider().getModel();
-    this.workerPageProvider = null;
-    this.workerFetchProvider = null;
+    this.checkProvider = null;
     this.periodicTimer = null;
   }
 
-  setWorkerPageProvider(fn) {
-    this.workerPageProvider = typeof fn === 'function' ? fn : null;
-  }
-
-  setWorkerFetchProvider(fn) {
-    this.workerFetchProvider = typeof fn === 'function' ? fn : null;
+  setCheckProvider(fn) {
+    this.checkProvider = typeof fn === 'function' ? fn : null;
   }
 
   _getHealthUrl() {
+    const connKey = this.ensureConnKey();
     const url = this.model.get(`${this.id}_url`);
-    return buildHealthCheckUrl(url);
+    return buildHealthCheckUrl(url, connKey);
   }
 
   _getValidationInterval() {
     return this.model.get(`${this.id}_validationInterval`) || 0;
+  }
+
+  _getConnKeyKey() {
+    return `${this.id}_conn_key`;
   }
 
   _getStatusKey() {
@@ -78,73 +108,47 @@ class HealthChecker {
     return `${this.id}_last_activity`;
   }
 
-  /**
-   * Ensures the worker tab exists and is on the health URL (login page when signed out).
-   * Call at startup so the user has one tab to log in on; doCheck() uses the same tab.
-   * @returns {Promise<boolean>} true if tab is open and navigated
-   */
-  async ensureHealthTab() {
-    const healthUrl = this._getHealthUrl();
-    if (!healthUrl || typeof this.workerPageProvider !== 'function') {
-      return false;
+  ensureConnKey() {
+    const keyName = this._getConnKeyKey();
+    const existing = this.model.get(keyName);
+    if (typeof existing === 'string' && existing) {
+      return existing;
     }
-    try {
-      const page = await this.workerPageProvider();
-      if (!page || page.isClosed()) {
-        return false;
-      }
-      await page.goto(healthUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      return true;
-    } catch (e) {
-      return false;
-    }
+    const next = randomUUID();
+    this.model.set(keyName, next);
+    return next;
+  }
+
+  rotateConnKey() {
+    const next = randomUUID();
+    this.model.set(this._getConnKeyKey(), next);
+    return next;
+  }
+
+  getCurrentSuccessSuffix() {
+    const connKey = this.ensureConnKey();
+    return buildSuccessSuffix(connKey);
+  }
+
+  isSuccessForCurrentKey(finalUrl) {
+    return pathEndsWithSuccessSuffix(finalUrl, this.getCurrentSuccessSuffix());
+  }
+
+  getHealthUrl() {
+    return this._getHealthUrl();
   }
 
   /**
-   * Runs a health check through the worker fetch process.
+   * Runs one health check.
    * @returns {Promise<boolean>} true if health check passed, false otherwise
    */
   async doCheck() {
-    const healthUrl = this._getHealthUrl();
-    if (!healthUrl || typeof this.workerFetchProvider !== 'function') {
+    if (typeof this.checkProvider !== 'function') {
       return false;
     }
     try {
-      const response = await this.workerFetchProvider(healthUrl, { method: 'GET' }, {
-        requireOn: false,
-      });
-      const finalUrl = response && typeof response.finalUrl === 'string'
-        ? response.finalUrl
-        : null;
-      let ok = pathEndsWithSuccessSuffix(finalUrl);
-
-      // Some instances rely on full-page navigation/redirect handling that fetch() may not reflect.
-      // Fallback to managed page navigation to determine effective final URL.
-      if (!ok && typeof this.workerPageProvider === 'function') {
-        try {
-          const page = await this.workerPageProvider();
-          if (page && !page.isClosed()) {
-            await page.goto(healthUrl, {
-              waitUntil: 'load',
-              timeout: 30000,
-            });
-            ok = pathEndsWithSuccessSuffix(page.url());
-          }
-        } catch (e) {
-          // ignore fallback errors; keep previous result
-        }
-      }
-      if (ok) {
-        this.model.set(this._getLastActivityKey(), Date.now());
-      } else {
-        this.model.set(this._getStatusKey(), 'off');
-      }
-      return ok;
+      return !!(await this.checkProvider());
     } catch (e) {
-      this.model.set(this._getStatusKey(), 'off');
       return false;
     }
   }
@@ -182,8 +186,8 @@ class HealthChecker {
 module.exports = {
   HealthChecker,
   extractFqdn,
+  buildSuccessSuffix,
   buildHealthCheckUrl,
   pathEndsWithSuccessSuffix,
-  HEALTH_PATH,
-  SUCCESS_PATH_SUFFIX,
+  HEALTH_TARGET_PATH,
 };

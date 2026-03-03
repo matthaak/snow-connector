@@ -16,12 +16,12 @@ const { HealthChecker } = require('../healthChecker.js');
 const { PORT } = require('./support/check-mock-server.js');
 const { ObservableModel } = require('observable-state-model');
 
-let browserPath = null;
-browserPath = '/Applications/Firefox.app/Contents/MacOS/firefox';
-
 const HOST = '127.0.0.1';
 const BASE_URL = `http://${HOST}:${PORT}`;
-const HEALTH_URL = `${BASE_URL}/nav_to.do?uri=sys.scripts.do`;
+
+function buildHealthUrlForConnKey(connKey) {
+  return `${BASE_URL}/nav_to.do?uri=${encodeURIComponent(`ws_blank_page.do?${connKey}`)}`;
+}
 
 describe('Connection (integration): managed/unmanaged lifecycle', () => {
   let model;
@@ -73,6 +73,19 @@ describe('Connection (integration): managed/unmanaged lifecycle', () => {
     throw new Error(`Timed out waiting for ${statusKey}=${expected}; actual=${model.get(statusKey)}`);
   }
 
+  async function waitForConnKeyChange(id, previous, timeoutMs = 5000) {
+    const keyName = `${id}_conn_key`;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = model.get(keyName);
+      if (typeof current === 'string' && current && current !== previous) {
+        return current;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`Timed out waiting for ${keyName} to rotate`);
+  }
+
   const skipIfNoBrowser = (fn) => function wrapped() {
     if (browserLaunchFailed) {
       pending('Browser not available');
@@ -89,7 +102,6 @@ describe('Connection (integration): managed/unmanaged lifecycle', () => {
 
     try {
       const provider = getBrowserProvider();
-      if (browserPath) provider.setExecutablePath(browserPath);
       await provider.launch({ headless: true });
     } catch (err) {
       browserLaunchFailed = true;
@@ -132,16 +144,20 @@ describe('Connection (integration): managed/unmanaged lifecycle', () => {
     expect(model.get(`${connection.id}_conn_status`)).toBe('off');
     expect(connection.workerPage).toBeTruthy();
     expect(connection.workerPage.isClosed()).toBe(false);
+    const firstConnKey = model.get(`${connection.id}_conn_key`);
+    expect(typeof firstConnKey).toBe('string');
+    expect(firstConnKey.length).toBeGreaterThan(0);
 
     // DO MANAGED LOGIN -> on
     await connection.workerPage.goto(`${BASE_URL}/index.do`, { waitUntil: 'load', timeout: 10000 });
-    await connection.workerPage.goto(HEALTH_URL, { waitUntil: 'load', timeout: 10000 });
+    await connection.workerPage.goto(buildHealthUrlForConnKey(firstConnKey), { waitUntil: 'load', timeout: 10000 });
     await waitForStatus(connection.id, 'on');
     expect(connection.isOn()).toBe(true);
+    const secondConnKey = await waitForConnKeyChange(connection.id, firstConnKey);
 
     // DO MANAGED LOGOUT -> off
     await connection.workerPage.goto(`${BASE_URL}/logout.do`, { waitUntil: 'load', timeout: 10000 });
-    await waitForStatus(connection.id, 'off');
+    await waitForStatus(connection.id, 'off', 7000);
     expect(connection.isOn()).toBe(false);
 
     // DO UNMANAGED LOGIN -> still off
@@ -151,6 +167,13 @@ describe('Connection (integration): managed/unmanaged lifecycle', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(connection.isOn()).toBe(false);
     expect(model.get(`${connection.id}_conn_status`)).toBe('off');
+
+    // OUT-OF-BAND stale-key success URL while off -> stays off
+    await unmanagedPage.goto(buildHealthUrlForConnKey(firstConnKey), { waitUntil: 'load', timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(connection.isOn()).toBe(false);
+    expect(model.get(`${connection.id}_conn_status`)).toBe('off');
+    expect(model.get(`${connection.id}_conn_key`)).toBe(secondConnKey);
 
     // CONNECT -> on (managed tab loads success path with existing session)
     const secondConnect = await connection.connect();

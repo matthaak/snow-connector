@@ -15,12 +15,13 @@ function isFirefoxPath(executablePath) {
 
 /**
  * Default browser provider: singleton that launches Chromium/Chrome or Firefox
- * based on the executable path set via setExecutablePath. If none is set, Puppeteer's bundled Chromium is used.
+ * based on the executable path set via setExecutablePath, or SNOW_CONNECTOR_BROWSER env var.
+ * If neither is set, Puppeteer's bundled Chromium is used.
  * Supports persistent profiles and password saving/recall.
  */
 function createDefaultBrowserProvider() {
   let browserInstance = null;
-  let executablePath = null;
+  let executablePath = process.env.SNOW_CONNECTOR_BROWSER || null;
 
   return {
     getBrowser() {

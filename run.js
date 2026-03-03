@@ -1,19 +1,18 @@
 const { model, ModelManager } = require('observable-state-model');
 const { startMockServiceNow } = require('./mock-servicenow.js');
-const { getBrowserProvider } = require('./providers.js');
+const provider = require('./providers.js').getBrowserProvider();
 const { Connection } = require('./connection.js');
 const { startBrowserSync } = require('./browserSync.js');
 
-// Update the URL to your ServiceNow instance
-const instanceUrl = 'https://dev224422.service-now.com';
+// Demo instance URL (dev tooling only). Override with SNOW_CONNECTOR_DEMO_INSTANCE.
+const instanceUrl = process.env.SNOW_CONNECTOR_DEMO_INSTANCE || 'https://your-instance.service-now.com';
 
-// Uncomment the browser you want to use by removing the # at the start of the line.
-// If all are commented, Puppeteer will use its bundled Chromium.
-let browserPath = null;
-// browserPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-browserPath = '/Applications/Firefox.app/Contents/MacOS/firefox';
-// browserPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-// browserPath = 'C:\\Program Files\\Mozilla Firefox\\firefox.exe';
+// Uncomment one of the below lines to override the default browser selected by snow-connector or set by the
+// SNOW_CONNECTOR_BROWSER environment variable.
+// provider.setExecutablePath('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+// provider.setExecutablePath('/Applications/Firefox.app/Contents/MacOS/firefox');
+// provider.setExecutablePath('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+// provider.setExecutablePath('C:\\Program Files\\Mozilla Firefox\\firefox.exe');
 
 const MONITOR_PORT = 3031;
 const monitorUrl = `http://localhost:${MONITOR_PORT}`;
@@ -25,9 +24,6 @@ startMockServiceNow(model);
 const manager = new ModelManager(MONITOR_PORT, model);
 manager.start();
 console.log(`Monitor at ${monitorUrl}`);
-
-const provider = getBrowserProvider();
-provider.setExecutablePath(browserPath);
 
 // Connection for the ServiceNow instance (id assigned sequentially by Connection).
 // Connection launches browser if needed and creates the login/worker tab.
