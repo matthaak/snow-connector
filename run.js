@@ -4,7 +4,7 @@ const provider = require('./providers.js').getBrowserProvider();
 const { Connection } = require('./connection.js');
 const { startBrowserSync } = require('./browserSync.js');
 
-// Demo instance URL (dev tooling only). Override with SNOW_CONNECTOR_DEMO_INSTANCE.
+// Demo instance URL (dev tooling only)
 const instanceUrl = process.env.SNOW_CONNECTOR_DEMO_INSTANCE || 'https://your-instance.service-now.com';
 
 // Uncomment one of the below lines to override the default browser selected by snow-connector or set by the
